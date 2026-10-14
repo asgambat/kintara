@@ -1,6 +1,6 @@
 mod content;
 mod mutate;
-mod upload;
+pub mod upload;
 
 use std::time::Duration;
 

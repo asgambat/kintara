@@ -17,6 +17,9 @@ pub mod users;
 use std::time::Duration;
 
 use axum::Router;
+use axum::http::HeaderValue;
+use axum::middleware::{self, Next};
+use axum::response::Response;
 use axum::routing::{get, post};
 use tower::Layer;
 use tower_http::compression::CompressionLayer;
@@ -89,5 +92,38 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .nest("/api", api)
         .fallback_service(spa)
+        .layer(middleware::from_fn(immutable_assets))
         .layer(TraceLayer::new_for_http())
+}
+
+/// Long-lived cache for fingerprinted bundles. Vite emits JS/CSS with a content
+/// hash (`app-Ab12Cd34.js`), so a year-long `immutable` is always correct for
+/// them. The brand aliases under `assets/brand/` are the exception — same name,
+/// changing bytes — and they fail the hash check below, as does everything
+/// outside `/assets/` (`index.html`, `/api/*`). Only successful responses are
+/// marked; a 404 for a stale hashed name must stay revalidatable.
+async fn immutable_assets(req: axum::extract::Request, next: Next) -> Response {
+    let fingerprint = is_hashed_asset(req.uri().path());
+    let mut response = next.run(req).await;
+    if fingerprint && response.status().is_success() {
+        response.headers_mut().insert(
+            axum::http::header::CACHE_CONTROL,
+            HeaderValue::from_static("public, max-age=31536000, immutable"),
+        );
+    }
+    response
+}
+
+fn is_hashed_asset(path: &str) -> bool {
+    let Some(file) = path.strip_prefix("/assets/") else {
+        return false;
+    };
+    let file = file.rsplit('/').next().unwrap_or(file);
+    let stem = file.rsplit_once('.').map(|(stem, _)| stem).unwrap_or(file);
+    stem.rsplit_once('-').is_some_and(|(_, hash)| {
+        hash.len() >= 8
+            && hash
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'_')
+    })
 }

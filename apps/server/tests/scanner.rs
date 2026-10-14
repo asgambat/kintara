@@ -269,3 +269,34 @@ async fn unchanged_documents_without_extraction_are_backfilled() {
         .unwrap();
     assert_eq!(status, "ok");
 }
+
+#[tokio::test]
+async fn concurrent_scan_with_many_jobs_indexes_every_file_exactly_once() {
+    let app = TestApp::new().await;
+    // Distinct contents: identical bytes would be deduplicated by hash.
+    for i in 0..12 {
+        std::fs::write(
+            app.config.library_dir.join(format!("doc-{i:02}.md")),
+            format!("# document {i}\n\nbody text {i}"),
+        )
+        .unwrap();
+    }
+
+    let state = AppState::new(
+        app.db.clone(),
+        kintara_server::config::Config {
+            scan_jobs: 8,
+            ..app.config.clone()
+        },
+    );
+    scanner::full_scan(&state).await.unwrap();
+    // A second pass must find everything already indexed: no duplicates from
+    // the concurrent run, nothing missed.
+    scanner::full_scan(&state).await.unwrap();
+
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM documents")
+        .fetch_one(&app.db)
+        .await
+        .unwrap();
+    assert_eq!(count, 12, "every file exactly once, whatever the job count");
+}

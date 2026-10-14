@@ -40,6 +40,7 @@ impl TestApp {
             // race their assertions.
             scan_on_start: false,
             watch: false,
+            scan_jobs: 2,
             max_upload_bytes: 64 * 1024 * 1024,
             extra_library_dirs: Vec::new(),
             github_oauth: None,

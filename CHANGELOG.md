@@ -9,12 +9,25 @@ All notable changes to this project will be documented in this file.
 - Multiple library roots: `KINTARA_EXTRA_LIBRARY_DIRS` adds colon-separated roots
   scanned and watched alongside `/library`; uploads still land on the primary root.
   Documents removed with their root unconfigured are hidden, not deleted.
+- Upload robustness: temp files from uploads interrupted by a crash are discarded
+  at startup, and a document whose database store fails no longer leaves an
+  orphaned file in the library. (Document uploads already streamed to disk in
+  chunks with hashing on the fly.)
+- The startup scan now indexes files concurrently (`KINTARA_SCAN_JOBS`, default
+  half the CPUs) and runs in the background, so the server answers requests and
+  health checks immediately even with a huge library.
 - The database is copied to `<data_dir>/backups` (last 5 kept) before pending
   migrations run, so a bad migration can be undone by swapping the file back.
 - JSON API routes now time out after 120 s; document bytes, thumbnails, uploads and
   AI calls (already bounded by their own clients) are excluded.
 - Faster first paint: pdf.js and React ship as separate chunks and Shiki loads
-  lazily on the first code block.
+  lazily on the first code block. Cover thumbnails now decode off the main thread
+  (`decoding="async"`; grid loading was already lazy with reserved aspect ratio).
+- Readers and the AI panel now load on demand (`ReaderPanes`/`AiPanel` chunks),
+  and large libraries render only the visible grid rows (virtualized past 60
+  loaded documents; "Load more", counts and sorting unchanged).
+- Fingerprinted bundles under `/assets/*` are served `immutable` (year-long cache);
+  unhashed brand aliases stay revalidatable.
 
 ### 🤖 CI and supply chain
 

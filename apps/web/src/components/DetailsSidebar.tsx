@@ -174,6 +174,7 @@ export function DetailsSidebar({ document, aiEnabled, onUpdate, onClose }: Detai
             <img
               src={`${documentUrls.thumbnail(docState.id)}?v=${docState.coverVersion ?? "cover"}-${coverVersion}`}
               alt={`Cover for ${docState.title}`}
+              decoding="async"
               className="object-cover w-full h-full"
             />
           ) : (

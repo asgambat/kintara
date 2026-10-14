@@ -86,6 +86,7 @@ export function DocumentCard({
             src={`${documentUrls.thumbnail(document.id)}?v=${document.coverVersion ?? ""}`}
             alt=""
             loading="lazy"
+            decoding="async"
           />
         ) : (
           <FileText size={48} className="text-muted opacity-50" aria-hidden="true" />

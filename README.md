@@ -202,6 +202,7 @@ to the account that uploaded them.
 | `KINTARA_BIND` | `0.0.0.0:8080` | Server listen address |
 | `KINTARA_SCAN_ON_START` | `true` | Scans the full document folder during startup |
 | `KINTARA_WATCH` | `true` | Watches the document folder for live changes |
+| `KINTARA_SCAN_JOBS` | half the CPUs | Files indexed in parallel during the startup scan |
 | `KINTARA_MAX_UPLOAD_MB` | `1024` | Maximum browser upload size in megabytes |
 | `KINTARA_LOG` | `kintara_server=info,tower_http=warn,warn` | Rust tracing filter |
 | `KINTARA_PUBLIC_URL` | none | Browser origin used for the OAuth callback |

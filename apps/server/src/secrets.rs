@@ -124,6 +124,7 @@ mod tests {
             bind: "127.0.0.1:0".parse().unwrap(),
             scan_on_start: false,
             watch: false,
+            scan_jobs: 1,
             max_upload_bytes: 1024,
             github_oauth: None,
             auth_mode: crate::config::AuthMode::Oauth,

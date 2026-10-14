@@ -62,8 +62,13 @@ pub struct Config {
     pub web_dir: PathBuf,
     pub bind: SocketAddr,
     /// Sweep the library at startup. Files arrive over SMB while the server is
-    /// down, so this is on by default.
+    /// down, so this is on by default. The sweep runs in the background (see
+    /// `main`), so it never delays the server answering requests.
     pub scan_on_start: bool,
+    /// How many files the startup scan indexes at once. Each PDF spawns up to
+    /// three poppler processes, so the default is half the CPUs rather than
+    /// all of them — a NAS has little headroom to spare.
+    pub scan_jobs: usize,
     /// Watch the library for changes while running. Worth turning off on a
     /// share where inotify watches are scarce or the filesystem does not
     /// report events at all.
@@ -118,6 +123,7 @@ impl Config {
             web_dir,
             bind,
             scan_on_start: bool_var("KINTARA_SCAN_ON_START", true),
+            scan_jobs: scan_jobs_from_env(),
             watch: bool_var("KINTARA_WATCH", true),
             max_upload_bytes: std::env::var("KINTARA_MAX_UPLOAD_MB")
                 .ok()
@@ -281,6 +287,20 @@ fn proxy_admin_users_from_env() -> Vec<String> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// Half the CPUs, at least one. Falls back to 2 when the parallelism is
+/// unknown (some containers hide it). An explicit `KINTARA_SCAN_JOBS` below 1
+/// is treated as unset rather than as a confusing zero-worker scan.
+fn scan_jobs_from_env() -> usize {
+    let default = std::thread::available_parallelism()
+        .map(|n| (n.get() / 2).max(1))
+        .unwrap_or(2);
+    std::env::var("KINTARA_SCAN_JOBS")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .filter(|&n| n >= 1)
+        .unwrap_or(default)
 }
 
 /// Accepts the spellings people actually type in a compose file.

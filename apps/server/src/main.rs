@@ -11,6 +11,9 @@ async fn main() -> Result<()> {
 
     let config = Config::from_env()?;
     config.ensure_dirs()?;
+    // Uploads interrupted by a crash leave temp files behind. Nothing serves
+    // requests yet, so anything in-flight-looking is genuinely stale.
+    routes::documents::upload::discard_stale_uploads(&config.library_dir).await;
 
     let args: Vec<String> = std::env::args().collect();
     if args.get(1).is_some_and(|arg| arg == "recover-owner") {
@@ -35,11 +38,16 @@ async fn main() -> Result<()> {
     auth::purge_expired_sessions(&state).await?;
 
     if scan_on_start {
-        if let Err(err) = scanner::full_scan(&state).await {
-            // A failed scan must not stop the server: the library is still
-            // readable from whatever is already indexed.
-            tracing::error!(?err, "library scan failed");
-        }
+        // The sweep runs in the background so the server answers requests
+        // (and health checks) immediately, even with a huge library. A failed
+        // scan must not stop the server: the library is still readable from
+        // whatever is already indexed.
+        let scan_state = state.clone();
+        tokio::spawn(async move {
+            if let Err(err) = scanner::full_scan(&scan_state).await {
+                tracing::error!(?err, "library scan failed");
+            }
+        });
     }
 
     if watch {

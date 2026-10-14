@@ -274,3 +274,25 @@ async fn nas_metadata_directories_are_ignored() {
     assert_eq!(listed["total"], 1);
     assert_eq!(listed["items"][0]["title"], "real");
 }
+
+#[tokio::test]
+async fn startup_discards_crashed_upload_temps_but_keeps_everything_else() {
+    let app = TestApp::new().await;
+    let incoming = app.config.library_dir.join(".kintara-incoming");
+    std::fs::create_dir_all(&incoming).unwrap();
+    // A temp name as `upload` generates it: pid + nanos, never user content.
+    std::fs::write(incoming.join(".upload-123-456789"), b"partial").unwrap();
+    std::fs::write(incoming.join("stray.pdf"), sample_pdf()).unwrap();
+
+    kintara_server::routes::documents::upload::discard_stale_uploads(&app.config.library_dir)
+        .await;
+
+    assert!(
+        !incoming.join(".upload-123-456789").exists(),
+        "a crashed upload temp must be discarded"
+    );
+    assert!(
+        incoming.join("stray.pdf").exists(),
+        "anything that is not an upload temp must be left alone"
+    );
+}

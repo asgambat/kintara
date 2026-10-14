@@ -149,7 +149,7 @@ export function ImportModal({
         <div className="modal-body import-layout">
           <div className="import-preview">
             {docState.hasThumbnail ? (
-              <img src={documentUrls.thumbnail(docState.id)} alt="" />
+              <img src={documentUrls.thumbnail(docState.id)} alt="" decoding="async" />
             ) : (
               <>
                 <ImageIcon size={32} className="text-muted mb-2 opacity-50" aria-hidden="true" />

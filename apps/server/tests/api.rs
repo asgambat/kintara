@@ -27,6 +27,7 @@ async fn test_app() -> (tempfile::TempDir, axum::Router) {
         // their assertions.
         scan_on_start: false,
         watch: false,
+        scan_jobs: 2,
         max_upload_bytes: 64 * 1024 * 1024,
         extra_library_dirs: Vec::new(),
         github_oauth: None,
@@ -99,6 +100,36 @@ async fn client_side_routes_fall_back_to_the_spa_index() {
 }
 
 #[tokio::test]
+async fn hashed_assets_are_immutable_but_brand_aliases_stay_revalidatable() {
+    let (dir, app) = test_app().await;
+    let assets = dir.path().join("web/assets");
+    std::fs::create_dir_all(assets.join("brand")).unwrap();
+    std::fs::write(assets.join("index-Ab12Cd34.js"), b"console.log(1)").unwrap();
+    std::fs::write(assets.join("brand/logo.png"), b"fakepng").unwrap();
+
+    let hashed = app
+        .clone()
+        .oneshot(get("/assets/index-Ab12Cd34.js"))
+        .await
+        .unwrap();
+    assert_eq!(hashed.status(), StatusCode::OK);
+    assert_eq!(
+        hashed
+            .headers()
+            .get("cache-control")
+            .map(|v| v.to_str().unwrap()),
+        Some("public, max-age=31536000, immutable")
+    );
+
+    let brand = app.oneshot(get("/assets/brand/logo.png")).await.unwrap();
+    assert_eq!(brand.status(), StatusCode::OK);
+    assert!(
+        brand.headers().get("cache-control").is_none(),
+        "unhashed brand aliases must stay revalidatable"
+    );
+}
+
+#[tokio::test]
 async fn config_defaults_are_relative_so_local_runs_need_no_setup() {
     // Guards against someone "helpfully" changing the defaults to /library and
     // /data, which would make `cargo run` fail outside a container.
@@ -144,6 +175,7 @@ fn database_lives_in_the_data_dir_not_the_library() {
         bind: "0.0.0.0:8080".parse().unwrap(),
         scan_on_start: false,
         watch: false,
+        scan_jobs: 2,
         max_upload_bytes: 64 * 1024 * 1024,
         extra_library_dirs: Vec::new(),
         github_oauth: None,

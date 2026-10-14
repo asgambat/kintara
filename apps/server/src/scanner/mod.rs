@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use notify::{RecursiveMode, Watcher};
 use tokio::sync::mpsc;
+use tokio::task::JoinSet;
 use walkdir::WalkDir;
 
 use crate::error::AppResult;
@@ -51,16 +52,40 @@ pub async fn full_scan(state: &AppState) -> AppResult<()> {
         .map_err(|err| crate::error::AppError::Internal(err.into()))?;
 
         scanned += files.len();
-        for path in &files {
-            if let Some((id, relative)) = index::root_id_for_path(&state.config, path) {
+        // Files are indexed concurrently, bounded by `scan_jobs`: each PDF
+        // spawns up to three poppler processes, so an unbounded fan-out would
+        // thrash a small NAS. The permit is acquired before spawning, which
+        // also bounds how many tasks pile up waiting.
+        let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(
+            state.config.scan_jobs.max(1),
+        ));
+        let mut indexing: JoinSet<(PathBuf, AppResult<Outcome>)> = JoinSet::new();
+        for path in files {
+            if let Some((id, relative)) = index::root_id_for_path(&state.config, &path) {
                 debug_assert_eq!(id, root_id);
                 seen.insert((id, relative));
             }
-            match index::index_file(state, path).await {
-                Ok(Outcome::Added(_)) => added += 1,
-                Ok(Outcome::Updated(_)) => updated += 1,
-                Ok(Outcome::Skipped) => {}
-                Err(err) => tracing::warn!(path = %path.display(), ?err, "failed to index"),
+            let permit = semaphore
+                .clone()
+                .acquire_owned()
+                .await
+                .expect("scan semaphore is never closed");
+            let task_state = state.clone();
+            indexing.spawn(async move {
+                let _permit = permit;
+                let outcome = index::index_file(&task_state, &path).await;
+                (path, outcome)
+            });
+        }
+        while let Some(finished) = indexing.join_next().await {
+            match finished {
+                Ok((_, Ok(Outcome::Added(_)))) => added += 1,
+                Ok((_, Ok(Outcome::Updated(_)))) => updated += 1,
+                Ok((_, Ok(Outcome::Skipped))) => {}
+                Ok((path, Err(err))) => {
+                    tracing::warn!(path = %path.display(), ?err, "failed to index")
+                }
+                Err(err) => tracing::warn!(?err, "index task failed"),
             }
         }
     }

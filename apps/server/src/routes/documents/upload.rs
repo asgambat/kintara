@@ -28,6 +28,43 @@ const ALLOWED_COVER: [&str; 4] = ["png", "jpg", "jpeg", "webp"];
 /// into a full copy. The leading dot keeps the scanner out of it.
 const INCOMING_DIR: &str = ".kintara-incoming";
 
+/// Removes temp files left behind by uploads interrupted by a crash or a
+/// restart. Only ever called at startup, before the server accepts requests,
+/// so nothing legitimately in-flight can match: temp names are
+/// `.upload-{pid}-{nanos}` and never user content. Anything else in the
+/// directory is left alone.
+pub async fn discard_stale_uploads(library_dir: &StdPath) {
+    let incoming = library_dir.join(INCOMING_DIR);
+    let Ok(mut entries) = tokio::fs::read_dir(&incoming).await else {
+        return;
+    };
+    loop {
+        match entries.next_entry().await {
+            Ok(Some(entry)) => {
+                let name = entry.file_name();
+                if name.to_string_lossy().starts_with(".upload-") {
+                    if let Err(err) = tokio::fs::remove_file(entry.path()).await {
+                        tracing::warn!(
+                            path = %entry.path().display(),
+                            %err,
+                            "could not remove stale upload temp file"
+                        );
+                    }
+                }
+            }
+            Ok(None) => break,
+            Err(err) => {
+                tracing::warn!(
+                    dir = %incoming.display(),
+                    %err,
+                    "could not list incoming directory for stale upload cleanup"
+                );
+                break;
+            }
+        }
+    }
+}
+
 /// Accepts a `multipart/form-data` upload with a `file` part, plus optional
 /// `libraryId` and `collectionId` parts to file it on arrival.
 ///
@@ -201,6 +238,37 @@ async fn finish(
         .await
         .map_err(|err| AppError::Internal(err.into()))?;
 
+    // The file is already in place: if storing it fails (a full disk on the
+    // data volume, say), remove it again rather than leaving a library file
+    // with no database row behind.
+    match store_new_document(
+        state,
+        user_id,
+        &destination,
+        upload,
+        &relative_path,
+        library_id,
+        collection_id,
+    )
+    .await
+    {
+        Ok(done) => Ok(done),
+        Err(err) => {
+            let _ = tokio::fs::remove_file(&destination).await;
+            Err(err)
+        }
+    }
+}
+
+async fn store_new_document(
+    state: &AppState,
+    user_id: i64,
+    destination: &StdPath,
+    upload: &StreamedUpload,
+    relative_path: &str,
+    library_id: Option<i64>,
+    collection_id: Option<i64>,
+) -> AppResult<(StatusCode, Json<Document>)> {
     let metadata = if upload.extension == "pdf" {
         media::extract_pdf_metadata(&destination).await
     } else {
@@ -227,7 +295,7 @@ async fn finish(
     .bind(user_id)
     .bind(&title)
     .bind(&metadata.author)
-    .bind(&relative_path)
+    .bind(relative_path)
     .bind(&upload.extension)
     .bind(&upload.hash)
     .bind(upload.size)

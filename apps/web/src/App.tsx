@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { Suspense, lazy, useEffect, useState } from "react";
 import "./App.css";
 import "./components/Ai.css";
 import "./components/AiFeatures.css";
@@ -14,11 +14,18 @@ import { BulkImportModal } from "./components/BulkImportModal";
 import { OnboardingOverlay } from "./components/OnboardingOverlay";
 import { LibrarySettingsModal } from "./components/LibrarySettingsModal";
 import { AppHeader } from "./components/AppHeader";
-import { ReaderPanes } from "./components/ReaderPanes";
+// Split out of the entry chunk: react-markdown/remark (readers) and the AI
+// panel's own weight are only needed once a document is opened or the
+// assistant is toggled. PdfReader's pdf.js was already a separate chunk.
+const ReaderPanes = lazy(() =>
+  import("./components/ReaderPanes").then((m) => ({ default: m.ReaderPanes })),
+);
 import { MoveDocumentModal } from "./components/MoveDocumentModal";
 import { ConfirmDialog } from "./components/ConfirmDialog";
 import { ImportOverlays } from "./components/ImportOverlays";
-import { AiPanel } from "./components/AiPanel";
+const AiPanel = lazy(() =>
+  import("./components/AiPanel").then((m) => ({ default: m.AiPanel })),
+);
 import { AiSearchSummary } from "./components/AiSearchSummary";
 import { useAiSearch } from "./hooks/useAiSearch";
 import { useDocumentTabs } from "./hooks/useDocumentTabs";
@@ -433,11 +440,19 @@ function App() {
               />
             </div>
           ) : (
-            <ReaderPanes
-              activeDocument={activeDocument}
-              splitDocument={splitRightTabIndex !== null ? openTabs[splitRightTabIndex] ?? null : null}
-              isSplitView={isSplitView}
-            />
+            <Suspense
+              fallback={
+                <div className="document-grid-status" role="status">
+                  Loading reader…
+                </div>
+              }
+            >
+              <ReaderPanes
+                activeDocument={activeDocument}
+                splitDocument={splitRightTabIndex !== null ? openTabs[splitRightTabIndex] ?? null : null}
+                isSplitView={isSplitView}
+              />
+            </Suspense>
           )}
         </div>
       </main>
@@ -454,7 +469,17 @@ function App() {
           onClose={() => setDetailsDocument(null)}
         />
       )}
-      {isAiOpen && viewMode === "reading" && activeDocument && <AiPanel document={activeDocument} settingsRevision={aiSettingsRevision} onClose={() => setIsAiOpen(false)} onUpdated={(updated) => { replaceDocument(updated); replaceListedDocument(updated); }} />}
+      {isAiOpen && viewMode === "reading" && activeDocument && (
+        <Suspense
+          fallback={
+            <div className="document-grid-status" role="status">
+              Loading assistant…
+            </div>
+          }
+        >
+          <AiPanel document={activeDocument} settingsRevision={aiSettingsRevision} onClose={() => setIsAiOpen(false)} onUpdated={(updated) => { replaceDocument(updated); replaceListedDocument(updated); }} />
+        </Suspense>
+      )}
     </div>
   );
 }
