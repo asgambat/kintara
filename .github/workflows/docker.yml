@@ -52,7 +52,11 @@ jobs:
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          # GHCR_TOKEN (PAT with write:packages) is the way out when the org
+          # "Packages → Actions permissions" setting denies the GITHUB_TOKEN
+          # to CREATE an organization package, which is what the first push
+          # needs. Falls back to the default token when the secret is absent.
+          password: ${{ secrets.GHCR_TOKEN || secrets.GITHUB_TOKEN }}
 
       # Labels only: tags and latest semantics are applied once, in `merge`,
       # to the assembled manifest list.
@@ -152,7 +156,10 @@ jobs:
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          # Same as the build job: PAT-first, default token fallback. `cosign
+          # sign` reuses the credentials this step leaves in the Docker
+          # config, so the signature push needs no separate token.
+          password: ${{ secrets.GHCR_TOKEN || secrets.GITHUB_TOKEN }}
 
       - name: Derive image tags
         id: meta
