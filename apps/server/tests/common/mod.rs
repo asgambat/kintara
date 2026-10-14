@@ -42,6 +42,10 @@ impl TestApp {
             watch: false,
             max_upload_bytes: 64 * 1024 * 1024,
             github_oauth: None,
+            auth_mode: kintara_server::config::AuthMode::Oauth,
+            local_user: "local".to_string(),
+            proxy_user_header: None,
+            proxy_admin_users: Vec::new(),
         };
         config.ensure_dirs().expect("create dirs");
         std::fs::create_dir_all(&config.web_dir).expect("create web dir");

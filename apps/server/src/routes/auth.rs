@@ -30,6 +30,7 @@ pub struct AuthStatus {
     pub oauth_configured: bool,
     pub authenticated: bool,
     pub user: Option<Session>,
+    pub auth_mode: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -64,18 +65,37 @@ pub async fn status(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> AppResult<Json<AuthStatus>> {
+    use crate::config::AuthMode;
+    let mode = state.config.auth_mode;
+    // No-auth modes never need a GitHub owner and never use OAuth.
+    if mode == AuthMode::SingleUser {
+        let id = auth::ensure_no_auth_owner(&state).await?;
+        let user = load_session(&state, id).await?;
+        return Ok(Json(AuthStatus {
+            needs_owner: false,
+            oauth_configured: false,
+            authenticated: user.is_some(),
+            user,
+            auth_mode: mode.as_str().to_string(),
+        }));
+    }
+    if mode == AuthMode::ProxyHeader {
+        let id = proxy_user_from_headers(&state, &headers).await?;
+        let user = match id {
+            Some(id) => load_session(&state, id).await?,
+            None => None,
+        };
+        return Ok(Json(AuthStatus {
+            needs_owner: false,
+            oauth_configured: false,
+            authenticated: user.is_some(),
+            user,
+            auth_mode: mode.as_str().to_string(),
+        }));
+    }
+
     let user = match session_user(&state, &headers).await? {
-        Some(id) => sqlx::query_as::<_, (String, i64, Option<String>)>(
-            "SELECT username, is_admin, avatar_url FROM users WHERE id = ?",
-        )
-        .bind(id)
-        .fetch_optional(&state.db)
-        .await?
-        .map(|(username, is_admin, avatar_url)| Session {
-            username,
-            is_admin: is_admin != 0,
-            avatar_url,
-        }),
+        Some(id) => load_session(&state, id).await?,
         None => None,
     };
 
@@ -84,10 +104,16 @@ pub async fn status(
         oauth_configured: state.config.github_oauth.is_some(),
         authenticated: user.is_some(),
         user,
+        auth_mode: mode.as_str().to_string(),
     }))
 }
 
 pub async fn github_start(State(state): State<AppState>) -> AppResult<Response> {
+    if state.config.auth_mode.is_no_auth() {
+        return Err(AppError::Unavailable(
+            "login is disabled (homelab auth mode)".into(),
+        ));
+    }
     let config = state.config.github_oauth.as_ref().ok_or_else(|| {
         AppError::Unavailable("GitHub login has not been configured by the operator".into())
     })?;
@@ -132,6 +158,11 @@ pub async fn github_callback(
     Query(query): Query<CallbackQuery>,
     headers: HeaderMap,
 ) -> AppResult<Response> {
+    if state.config.auth_mode.is_no_auth() {
+        return Err(AppError::Unavailable(
+            "login is disabled (homelab auth mode)".into(),
+        ));
+    }
     if query.error.is_some() {
         return Err(AppError::Unauthorized(
             "GitHub sign-in was cancelled or denied".into(),
@@ -243,6 +274,9 @@ pub async fn github_callback(
 }
 
 pub async fn logout(State(state): State<AppState>, headers: HeaderMap) -> AppResult<Response> {
+    if state.config.auth_mode.is_no_auth() {
+        return Ok(StatusCode::NO_CONTENT.into_response());
+    }
     if let Some(id) = session_id(&headers) {
         auth::destroy_session(&state, &id).await?;
     }
@@ -306,4 +340,42 @@ async fn session_user(state: &AppState, headers: &HeaderMap) -> AppResult<Option
         Some(id) => auth::user_for_session(state, &id).await,
         None => Ok(None),
     }
+}
+
+async fn load_session(state: &AppState, id: i64) -> AppResult<Option<Session>> {
+    Ok(sqlx::query_as::<_, (String, i64, Option<String>)>(
+        "SELECT username, is_admin, avatar_url FROM users WHERE id = ?",
+    )
+    .bind(id)
+    .fetch_optional(&state.db)
+    .await?
+    .map(|(username, is_admin, avatar_url)| Session {
+        username,
+        is_admin: is_admin != 0,
+        avatar_url,
+    }))
+}
+
+/// Best-effort proxy user for `/status`: returns `None` (unauthenticated)
+/// instead of an error when the trusted header is missing or invalid, so the
+/// frontend can show a helpful message rather than a generic 401.
+async fn proxy_user_from_headers(
+    state: &AppState,
+    headers: &HeaderMap,
+) -> AppResult<Option<i64>> {
+    let Some(header_name) = state.config.proxy_user_header.as_deref() else {
+        return Ok(None);
+    };
+    let Some(raw) = headers
+        .get(header_name)
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    else {
+        return Ok(None);
+    };
+    if auth::normalize_proxy_username(raw).is_none() {
+        return Ok(None);
+    }
+    Ok(Some(auth::resolve_proxy_user(state, raw).await?))
 }

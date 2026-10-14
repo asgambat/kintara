@@ -207,10 +207,22 @@ to the account that uploaded them.
 | `KINTARA_PUBLIC_URL` | none | Browser origin used for the OAuth callback |
 | `KINTARA_GITHUB_CLIENT_ID` | none | GitHub OAuth client ID |
 | `KINTARA_GITHUB_CLIENT_SECRET` | none | GitHub OAuth client secret |
+| `KINTARA_AUTH_MODE` | `oauth` | `oauth`, `single-user`, or `proxy-header` |
+| `KINTARA_LOCAL_USER` | `local` | Username of the shared owner in homelab modes |
+| `KINTARA_PROXY_USER_HEADER` | none | Trusted username header for `proxy-header` mode, e.g. `X-Forwarded-User` |
+| `KINTARA_PROXY_ADMIN_USERS` | none | Comma-separated usernames always admin in `proxy-header` mode |
 | `KINTARA_SECRET` | generated file | Optional provider-key encryption source of 32 or more characters |
 
 GitHub login stays disabled unless all three OAuth variables are set. Kintara stops during
 startup if only part of the OAuth configuration is present.
+
+In `single-user` and `proxy-header` modes the GitHub variables are ignored, so a homelab
+behind a reverse proxy needs no OAuth app and no public URL. Switching modes only needs a
+restart; users, libraries and reading state are kept, so you can return to `oauth` later.
+In `proxy-header` mode one account is auto-created per header value (no invitations); the
+first account, plus any name in `KINTARA_PROXY_ADMIN_USERS`, is admin. Scanner files
+belong to the installation owner, so additional proxy users see their own uploads plus
+whatever is shared with them through libraries, like in OAuth mode.
 
 If `KINTARA_SECRET` is absent, Kintara creates `/data/kintara-ai.key`. Back up this key
 with the database. Saved OpenAI and Google keys cannot be decrypted without it.
@@ -233,6 +245,38 @@ https://kintara.example.com/api/auth/github/callback
 
 Kintara serves the API, frontend, document streams, and OAuth routes from one origin. The
 proxy must pass normal requests and HTTP Range headers to the container.
+
+### Homelab without login
+
+When the reverse proxy already authenticates (Authelia, Authentik, Pangolin, ...) Kintara
+can skip its own login:
+
+```yaml
+# single shared owner, no login at all
+environment:
+  KINTARA_AUTH_MODE: single-user
+  KINTARA_LOCAL_USER: homelab
+```
+
+```yaml
+# one account per proxy user
+environment:
+  KINTARA_AUTH_MODE: proxy-header
+  KINTARA_PROXY_USER_HEADER: X-Forwarded-User
+  KINTARA_PROXY_ADMIN_USERS: you,partner
+```
+
+```nginx
+# Nginx: forward the authenticated user (strip any client-sent value first)
+proxy_set_header X-Forwarded-User "";
+# ... after your auth check:
+proxy_set_header X-Forwarded-User $remote_user;
+proxy_pass http://kintara:8080;
+```
+
+CAUTION: in homelab modes anyone who can reach Kintara directly has full access. Bind it to
+the LAN / Docker network only, let the proxy be the only entry point, and make the proxy
+strip the trusted header from outside traffic.
 
 ## Update the container
 

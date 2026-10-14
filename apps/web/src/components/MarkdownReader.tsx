@@ -1,10 +1,10 @@
 import React, { useEffect, useState, useRef, useCallback } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import rehypeRaw from "rehype-raw";
 import { codeToHtml } from "shiki";
 import { annotationService, documentService, type Annotation } from "../api";
 import { onHighlightRequest, reportHighlight } from "../lib/reader-events";
+import { safeHighlightColor } from "../lib/highlight-color";
 import "./MarkdownReader.css";
 
 interface MarkdownReaderProps {
@@ -16,6 +16,82 @@ const getHighlightColor = () =>
   getComputedStyle(document.documentElement)
     .getPropertyValue('--highlight-color')
     .trim() || "rgba(139, 92, 246, 0.35)";
+
+/** Upper bound on highlight DOM work per render, so a huge annotation list
+ *  cannot freeze the reader. */
+const MAX_HIGHLIGHT_MARKS = 1000;
+
+/** Longest annotation excerpt eligible for in-text highlighting. */
+const MAX_HIGHLIGHT_EXCERPT = 2000;
+
+function unwrapMarks(root: HTMLElement) {
+  root.querySelectorAll("mark[data-annotation-id]").forEach((mark) => {
+    const parent = mark.parentNode;
+    if (!parent) return;
+    parent.replaceChild(document.createTextNode(mark.textContent ?? ""), mark);
+  });
+}
+
+function collectTextNodes(root: Node): Text[] {
+  const out: Text[] = [];
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+    acceptNode(node) {
+      const parent = node.parentNode;
+      if (!parent || !node.textContent) return NodeFilter.FILTER_REJECT;
+      if (
+        parent instanceof HTMLElement &&
+        (parent.closest("mark[data-annotation-id]") ||
+          parent.closest("script,style"))
+      ) {
+        return NodeFilter.FILTER_REJECT;
+      }
+      return NodeFilter.FILTER_ACCEPT;
+    },
+  });
+  while (walker.nextNode()) out.push(walker.currentNode as Text);
+  return out;
+}
+
+/**
+ * Wraps annotation excerpts in `<mark>` elements built with the DOM API.
+ *
+ * Everything user-controlled (excerpt text, color, id) travels through
+ * `textContent`, `dataset` and `style` — never through HTML parsing — so a
+ * crafted annotation cannot break out into script. Raw HTML in the document
+ * itself is inert because the Markdown pipeline below no longer parses it.
+ */
+function applyHighlights(root: HTMLElement, annotations: Annotation[]) {
+  unwrapMarks(root);
+  let budget = MAX_HIGHLIGHT_MARKS;
+  for (const ann of annotations) {
+    const needle = ann.content ?? "";
+    if (needle.length === 0 || needle.length > MAX_HIGHLIGHT_EXCERPT) continue;
+    const color = safeHighlightColor(ann.color);
+    for (const node of collectTextNodes(root)) {
+      if (budget <= 0) break;
+      let current: Text | null = node;
+      while (current && budget > 0) {
+        const haystack = current.textContent ?? "";
+        const idx = haystack.indexOf(needle);
+        if (idx === -1) break;
+        const matched = current.splitText(idx);
+        const rest = matched.splitText(needle.length);
+        const mark = document.createElement("mark");
+        mark.dataset.annotationId = String(ann.id);
+        mark.textContent = needle;
+        mark.style.backgroundColor = color;
+        mark.style.cursor = "pointer";
+        mark.style.borderRadius = "2px";
+        mark.title = "Click to remove highlight";
+        matched.parentNode?.replaceChild(mark, matched);
+        current = rest;
+        budget -= 1;
+      }
+      if (budget <= 0) break;
+    }
+    if (budget <= 0) break;
+  }
+}
 
 export const MarkdownReader: React.FC<MarkdownReaderProps> = ({ documentId }) => {
   const [content, setContent] = useState<string>("");
@@ -130,6 +206,13 @@ export const MarkdownReader: React.FC<MarkdownReaderProps> = ({ documentId }) =>
     return () => el.removeEventListener("click", handleMarkClick);
   }, [handleMarkClick]);
 
+  // Paint highlights after each render of content or annotations.
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    applyHighlights(el, annotations);
+  });
+
   const processContent = (raw: string) => {
     let processed = raw;
 
@@ -138,20 +221,9 @@ export const MarkdownReader: React.FC<MarkdownReaderProps> = ({ documentId }) =>
     // Fix empty lines between table rows
     processed = processed.replace(/\|\s*\n\s*\n\s*\|/g, '|\n|');
 
-    // Wrap existing annotations in <mark> with data-annotation-id so click-to-remove works
-    annotations.forEach(ann => {
-      if (ann.content) {
-        const escapedContent = ann.content.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-        const regex = new RegExp(`(${escapedContent})`, 'g');
-        processed = processed.replace(
-          regex,
-          `<mark data-annotation-id="${ann.id}" style="background-color: ${ann.color}; cursor: pointer; border-radius: 2px;" title="Click to remove highlight">$1</mark>`
-        );
-      }
-    });
-
-    // WikiLinks [[Link]] → a simple markdown link
-    processed = processed.replace(/\[\[(.*?)\]\]/g, '<a href="#" class="wikilink" data-target="$1">#$1</a>');
+    // WikiLinks [[Link]] → plain "#Link" text. There is no wikilink target to
+    // navigate to, and emitting an <a> tag would need raw-HTML rendering.
+    processed = processed.replace(/\[\[(.*?)\]\]/g, (_, target: string) => `#${target}`);
 
     return processed;
   };
@@ -175,9 +247,15 @@ export const MarkdownReader: React.FC<MarkdownReaderProps> = ({ documentId }) =>
           </button>
         </p>
       )}
+      {/*
+        No rehypeRaw on purpose: raw HTML in library documents renders as
+        inert text instead of live elements, so a hostile .md on a shared
+        volume cannot run script in another reader's browser. Highlights are
+        painted afterwards with DOM APIs (applyHighlights), never with
+        HTML string interpolation.
+      */}
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
-        rehypePlugins={[rehypeRaw]}
         components={{
           code({ node, inline, className, children, ...props }: any) {
             const match = /language-(\w+)/.exec(className || "");
@@ -185,10 +263,12 @@ export const MarkdownReader: React.FC<MarkdownReaderProps> = ({ documentId }) =>
 
             useEffect(() => {
               if (!inline && match) {
+                // Shiki escapes the code it highlights, so this HTML is
+                // generated from text — not from document markup.
                 codeToHtml(String(children).replace(/\n$/, ""), {
                   lang: match[1],
                   theme: "github-dark",
-                }).then(setHighlightedCode);
+                }).then(setHighlightedCode, () => undefined);
               }
             }, [match, children, inline]);
 

@@ -61,6 +61,11 @@ export function Sidebar({ isOpen, searchQuery, setSearchQuery, activeView, setAc
     () => localStorage.getItem("kintara.sidebar.sharedLibraries") === "true",
   );
   const [sidebarMessage, setSidebarMessage] = useState<string | null>(null);
+  const [authMode, setAuthMode] = useState("oauth");
+
+  useEffect(() => {
+    authService.status().then((s) => setAuthMode(s.authMode ?? "oauth")).catch(() => {});
+  }, []);
 
   const [prompt, setPrompt] = useState<PromptConfig | null>(null);
 
@@ -376,6 +381,7 @@ export function Sidebar({ isOpen, searchQuery, setSearchQuery, activeView, setAc
           >
             <HelpCircle size={18} />
           </button>
+          {authMode === "oauth" && (
           <button
             className="sidebar-icon-btn"
             onClick={async () => {
@@ -388,6 +394,7 @@ export function Sidebar({ isOpen, searchQuery, setSearchQuery, activeView, setAc
           >
             <LogOut size={18} />
           </button>
+          )}
         </div>
       </aside>
 

@@ -29,6 +29,10 @@ async fn test_app() -> (tempfile::TempDir, axum::Router) {
         watch: false,
         max_upload_bytes: 64 * 1024 * 1024,
         github_oauth: None,
+        auth_mode: kintara_server::config::AuthMode::Oauth,
+        local_user: "local".to_string(),
+        proxy_user_header: None,
+        proxy_admin_users: Vec::new(),
     };
     config.ensure_dirs().expect("create dirs");
     std::fs::create_dir_all(&config.web_dir).expect("create web dir");
@@ -141,6 +145,10 @@ fn database_lives_in_the_data_dir_not_the_library() {
         watch: false,
         max_upload_bytes: 64 * 1024 * 1024,
         github_oauth: None,
+        auth_mode: kintara_server::config::AuthMode::Oauth,
+        local_user: "local".to_string(),
+        proxy_user_header: None,
+        proxy_admin_users: Vec::new(),
     };
 
     assert!(config.database_path().starts_with("/data"));

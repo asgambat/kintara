@@ -14,11 +14,21 @@ services:
       PGID: 1000
       TZ: Etc/UTC
 
-      # Create a GitHub OAuth app whose callback is:
+      # Default: GitHub OAuth. Create a GitHub OAuth app whose callback is:
       # https://kintara.example.com/api/auth/github/callback
       KINTARA_PUBLIC_URL: https://kintara.example.com
       KINTARA_GITHUB_CLIENT_ID: replace-with-client-id
       KINTARA_GITHUB_CLIENT_SECRET: replace-with-client-secret
+
+      # Homelab alternative: disable login entirely (LAN + reverse proxy that
+      # already authenticates). Uncomment to use without any OAuth app:
+      # KINTARA_AUTH_MODE: single-user
+      # KINTARA_LOCAL_USER: homelab
+      # Or trust a proxy username header (Authelia/Authentik/Pangolin) with one
+      # account per header value:
+      # KINTARA_AUTH_MODE: proxy-header
+      # KINTARA_PROXY_USER_HEADER: X-Forwarded-User
+      # KINTARA_PROXY_ADMIN_USERS: you,partner
 
       # Optional. If omitted, Kintara creates /data/kintara-ai.key. Keep either
       # this secret or that key file backed up with the database.

@@ -125,6 +125,10 @@ mod tests {
             watch: false,
             max_upload_bytes: 1024,
             github_oauth: None,
+            auth_mode: crate::config::AuthMode::Oauth,
+            local_user: "local".to_string(),
+            proxy_user_header: None,
+            proxy_admin_users: Vec::new(),
         }
     }
 

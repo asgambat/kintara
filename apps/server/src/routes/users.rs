@@ -63,12 +63,21 @@ pub async fn list_access(
     AuthenticatedUser(user_id): AuthenticatedUser,
 ) -> AppResult<Json<AccessList>> {
     require_admin(&state, user_id).await?;
-    let users = sqlx::query_as(
-        "SELECT id, username, is_admin, avatar_url
-         FROM users WHERE github_user_id IS NOT NULL ORDER BY username COLLATE NOCASE",
-    )
-    .fetch_all(&state.db)
-    .await?;
+    let users = if state.config.auth_mode.is_no_auth() {
+        sqlx::query_as(
+            "SELECT id, username, is_admin, avatar_url
+             FROM users ORDER BY username COLLATE NOCASE",
+        )
+        .fetch_all(&state.db)
+        .await?
+    } else {
+        sqlx::query_as(
+            "SELECT id, username, is_admin, avatar_url
+             FROM users WHERE github_user_id IS NOT NULL ORDER BY username COLLATE NOCASE",
+        )
+        .fetch_all(&state.db)
+        .await?
+    };
     let invitations = sqlx::query_as(
         "SELECT github_login, is_admin, created_at
          FROM github_invitations ORDER BY github_login COLLATE NOCASE",
@@ -83,6 +92,11 @@ pub async fn invite(
     AuthenticatedUser(user_id): AuthenticatedUser,
     Json(body): Json<InviteRequest>,
 ) -> AppResult<(StatusCode, Json<Invitation>)> {
+    if state.config.auth_mode.is_no_auth() {
+        return Err(AppError::Unavailable(
+            "invitations are disabled in homelab auth mode (users are automatic)".into(),
+        ));
+    }
     require_admin(&state, user_id).await?;
     let login = body.github_login.trim().trim_start_matches('@');
     if login.is_empty()
@@ -122,6 +136,11 @@ pub async fn remove_invitation(
     AuthenticatedUser(user_id): AuthenticatedUser,
     Path(login): Path<String>,
 ) -> AppResult<StatusCode> {
+    if state.config.auth_mode.is_no_auth() {
+        return Err(AppError::Unavailable(
+            "invitations are disabled in homelab auth mode (users are automatic)".into(),
+        ));
+    }
     require_admin(&state, user_id).await?;
     let result =
         sqlx::query("DELETE FROM github_invitations WHERE github_login = ? COLLATE NOCASE")
@@ -159,10 +178,16 @@ pub async fn remove_user(
             "remove or transfer this user's libraries and documents first".into(),
         ));
     }
-    let result = sqlx::query("DELETE FROM users WHERE id = ? AND github_user_id IS NOT NULL")
-        .bind(target_id)
-        .execute(&state.db)
-        .await?;
+    // In homelab modes proxy/local accounts have NULL github_user_id, so the
+    // OAuth-only filter would make them undeletable. In single-user mode the
+    // shared owner itself is still protected by the owned-content check above
+    // (scanner files belong to it) plus the self-removal check.
+    let delete = if state.config.auth_mode.is_no_auth() {
+        sqlx::query("DELETE FROM users WHERE id = ?")
+    } else {
+        sqlx::query("DELETE FROM users WHERE id = ? AND github_user_id IS NOT NULL")
+    };
+    let result = delete.bind(target_id).execute(&state.db).await?;
     if result.rows_affected() == 0 {
         return Err(AppError::NotFound);
     }

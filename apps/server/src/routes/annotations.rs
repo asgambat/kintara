@@ -34,6 +34,46 @@ pub struct CreateAnnotation {
     pub color: Option<String>,
 }
 
+/// Bounds for free-form annotation fields.
+///
+/// `content` and `color` are rendered by other readers: the Markdown reader
+/// used to interpolate them into raw HTML, so an overlong or crafted value
+/// could break out of its element. They are validated on write (and treated
+/// as opaque text on read), with tight length caps so one annotation cannot
+/// bloat the document payload for everyone else.
+const MAX_CONTENT_CHARS: usize = 10_000;
+const MAX_POSITION_CHARS: usize = 8_192;
+const MAX_COLOR_CHARS: usize = 64;
+
+/// Only plain color values the readers know how to paint: `#rgb` / `#rrggbb`
+/// (+ alpha variants) and `rgb()` / `rgba()` numeric tuples. Anything else —
+/// quotes, semicolons, angle brackets, `url(`, `expression(` — is rejected so
+/// a stored value can never break out of a `style` attribute or a React style
+/// prop into script or exfiltration CSS.
+fn valid_color(value: &str) -> bool {
+    let v = value.trim();
+    if v.is_empty() || v.len() > MAX_COLOR_CHARS {
+        return false;
+    }
+    if let Some(hex) = v.strip_prefix('#') {
+        return matches!(hex.len(), 3 | 4 | 6 | 8)
+            && hex.chars().all(|c| c.is_ascii_hexdigit());
+    }
+    let inner = v
+        .strip_prefix("rgba(")
+        .or_else(|| v.strip_prefix("rgb("))
+        .and_then(|rest| rest.strip_suffix(')'));
+    match inner {
+        Some(nums) => {
+            !nums.is_empty()
+                && nums.chars().all(|c| {
+                    c.is_ascii_digit() || matches!(c, ',' | '.' | ' ' | '\t' | '%' | '/')
+                })
+        }
+        None => false,
+    }
+}
+
 /// Annotations on one document, for the requesting user only.
 /// Mounted under `/documents/{id}/annotations`.
 pub async fn for_document(
@@ -72,6 +112,19 @@ pub async fn create(
     if body.serialized_position.trim().is_empty() {
         return Err(AppError::BadRequest(
             "serializedPosition cannot be empty".into(),
+        ));
+    }
+    if body.serialized_position.chars().count() > MAX_POSITION_CHARS {
+        return Err(AppError::BadRequest(
+            "serializedPosition is too long".into(),
+        ));
+    }
+    if body.content.as_ref().is_some_and(|c| c.chars().count() > MAX_CONTENT_CHARS) {
+        return Err(AppError::BadRequest("content is too long".into()));
+    }
+    if body.color.as_ref().is_some_and(|c| !valid_color(c)) {
+        return Err(AppError::BadRequest(
+            "color must be a hex (#rrggbb) or rgb()/rgba() value".into(),
         ));
     }
 

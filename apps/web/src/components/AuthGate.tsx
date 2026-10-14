@@ -21,11 +21,11 @@ export function AuthGate({ children }: AuthGateProps) {
 
   useEffect(() => { refresh(); }, []);
   useEffect(() => {
-    const onUnauthorized = () => setStatus((current) => current ? {
-      ...current,
-      authenticated: false,
-      user: null,
-    } : current);
+    // Re-fetch rather than locally clearing: in homelab no-auth modes a 401
+    // is transient (e.g. a missing proxy header on one request) and the next
+    // status is still authenticated, so flipping to the sign-in screen would
+    // flash incorrectly.
+    const onUnauthorized = () => { refresh(); };
     window.addEventListener("kintara-unauthorized", onUnauthorized);
     return () => window.removeEventListener("kintara-unauthorized", onUnauthorized);
   }, []);
@@ -42,6 +42,28 @@ export function AuthGate({ children }: AuthGateProps) {
   }
   if (!status) return <div className="auth-screen" role="status">Loading…</div>;
   if (status.authenticated) return <>{children}</>;
+  // Homelab modes never show the GitHub form: single-user always authenticates
+  // (a failure here is a server/DB problem, so offer retry), while
+  // proxy-header without a header means the reverse proxy is not setting it.
+  if (status.authMode && status.authMode !== "oauth") {
+    return (
+      <div className="auth-screen">
+        <div className="auth-card" role="alert">
+          <img src={BRAND_ASSET_PATHS.logo} alt="" width={56} height={56} />
+          <h1 className="auth-title">Homelab auth needs attention</h1>
+          {status.authMode === "proxy-header" ? (
+            <p className="auth-error">
+              The reverse proxy did not send the trusted user header. Check that it sets the
+              configured header before proxying to Kintara, then try again.
+            </p>
+          ) : (
+            <p className="auth-error">Could not sign you in automatically. The server may be starting.</p>
+          )}
+          <button className="btn btn-primary auth-submit" onClick={refresh}>Try again</button>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="auth-screen">

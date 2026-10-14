@@ -296,6 +296,52 @@ async fn an_invalid_annotation_type_is_a_400_not_a_constraint_error() {
 }
 
 #[tokio::test]
+async fn annotation_colors_must_be_plain_values_not_markup() {
+    let app = TestApp::new().await;
+    let doc = app.add_document("paper.pdf", b"bytes").await;
+
+    // Plain values the readers know how to paint keep working.
+    for color in ["#410186", "rgba(139, 92, 246, 0.35)", "rgb(0, 0, 0)"] {
+        let response = app
+            .send_json(
+                "POST",
+                "/api/annotations",
+                json!({
+                    "documentId": doc,
+                    "annotationType": "highlight",
+                    "serializedPosition": "{}",
+                    "color": color,
+                }),
+            )
+            .await;
+        assert_eq!(response.status(), StatusCode::CREATED, "color {color}");
+    }
+
+    // Anything that could break out of a style attribute is a 400.
+    for color in [
+        "red; background: url(evil)",
+        "\"onmouseover=\"alert(1)",
+        "</mark><script>alert(1)</script>",
+        "expression(alert(1))",
+        "red",
+    ] {
+        let response = app
+            .send_json(
+                "POST",
+                "/api/annotations",
+                json!({
+                    "documentId": doc,
+                    "annotationType": "highlight",
+                    "serializedPosition": "{}",
+                    "color": color,
+                }),
+            )
+            .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "color {color}");
+    }
+}
+
+#[tokio::test]
 async fn annotating_a_missing_document_is_404() {
     let app = TestApp::new().await;
 

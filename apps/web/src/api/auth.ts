@@ -11,6 +11,7 @@ export interface AuthStatus {
   oauthConfigured: boolean;
   authenticated: boolean;
   user: AuthUser | null;
+  authMode: string;
 }
 
 export const authService = {

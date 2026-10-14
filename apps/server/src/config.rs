@@ -10,6 +10,36 @@ pub struct GitHubOAuthConfig {
     pub public_url: String,
 }
 
+/// How the server authenticates browsers.
+///
+/// * `Oauth` is the default historical behaviour (GitHub OAuth + invitations).
+/// * `SingleUser` disables login entirely: every request acts as one shared
+///   local owner. Intended for a homelab LAN behind a reverse proxy that
+///   already authenticates.
+/// * `ProxyHeader` trusts a username header set by the reverse proxy
+///   (Authelia / Authentik / Pangolin ...) and auto-provisions one account
+///   per distinct header value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuthMode {
+    Oauth,
+    SingleUser,
+    ProxyHeader,
+}
+
+impl AuthMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Oauth => "oauth",
+            Self::SingleUser => "single-user",
+            Self::ProxyHeader => "proxy-header",
+        }
+    }
+
+    pub fn is_no_auth(self) -> bool {
+        !matches!(self, Self::Oauth)
+    }
+}
+
 /// Runtime configuration, read entirely from the environment.
 ///
 /// Defaults are relative paths so `cargo run` works from the crate directory
@@ -40,6 +70,15 @@ pub struct Config {
     /// OAuth credentials stay on the server; the frontend receives only a
     /// relative URL that begins the authorization flow.
     pub github_oauth: Option<GitHubOAuthConfig>,
+    pub auth_mode: AuthMode,
+    /// Username of the shared local owner used in `single-user` mode and as
+    /// the fallback seed in `proxy-header` mode.
+    pub local_user: String,
+    /// Trusted username header for `proxy-header` mode, e.g.
+    /// `X-Forwarded-User`. Lowercased at parse time.
+    pub proxy_user_header: Option<String>,
+    /// Usernames (lowercased) that are always admin in `proxy-header` mode.
+    pub proxy_admin_users: Vec<String>,
 }
 
 impl Config {
@@ -53,7 +92,19 @@ impl Config {
             .parse::<SocketAddr>()
             .with_context(|| format!("KINTARA_BIND is not a valid address: {bind_raw}"))?;
 
-        let github_oauth = github_oauth_from_env()?;
+        let auth_mode = auth_mode_from_env()?;
+        let local_user = local_user_from_env()?;
+        let proxy_user_header = proxy_user_header_from_env(auth_mode)?;
+        let proxy_admin_users = proxy_admin_users_from_env();
+
+        // In no-auth modes GitHub OAuth is ignored so a homelab does not need
+        // a public URL or an OAuth app at all. Keeping the vars set is not an
+        // error; they are just unused until the mode is switched back.
+        let github_oauth = if auth_mode == AuthMode::Oauth {
+            github_oauth_from_env()?
+        } else {
+            None
+        };
 
         Ok(Self {
             library_dir,
@@ -68,6 +119,10 @@ impl Config {
                 .unwrap_or(1024)
                 .saturating_mul(1024 * 1024),
             github_oauth,
+            auth_mode,
+            local_user,
+            proxy_user_header,
+            proxy_admin_users,
         })
     }
 
@@ -126,6 +181,71 @@ fn github_oauth_from_env() -> Result<Option<GitHubOAuthConfig>> {
         client_secret: client_secret.unwrap(),
         public_url,
     }))
+}
+
+fn auth_mode_from_env() -> Result<AuthMode> {
+    let raw = std::env::var("KINTARA_AUTH_MODE").unwrap_or_else(|_| "oauth".to_string());
+    let normalized = raw.trim().to_ascii_lowercase().replace('_', "-");
+    match normalized.as_str() {
+        "oauth" | "github" => Ok(AuthMode::Oauth),
+        "single-user" | "singleuser" | "disabled" | "no-auth" | "noauth" | "none" => {
+            Ok(AuthMode::SingleUser)
+        }
+        "proxy-header" | "proxyheader" | "proxy" | "header" | "forwarded-user" => {
+            Ok(AuthMode::ProxyHeader)
+        }
+        _ => anyhow::bail!(
+            "KINTARA_AUTH_MODE must be one of oauth, single-user, proxy-header (got '{raw}')"
+        ),
+    }
+}
+
+fn local_user_from_env() -> Result<String> {
+    let raw = std::env::var("KINTARA_LOCAL_USER").unwrap_or_else(|_| "local".to_string());
+    let name = raw.trim().to_string();
+    if name.is_empty() {
+        anyhow::bail!("KINTARA_LOCAL_USER cannot be empty");
+    }
+    if name.len() > 64 || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' ) {
+        anyhow::bail!(
+            "KINTARA_LOCAL_USER must be 1-64 chars of letters, digits, '-', '_' or '.'"
+        );
+    }
+    Ok(name)
+}
+
+fn proxy_user_header_from_env(mode: AuthMode) -> Result<Option<String>> {
+    let raw = std::env::var("KINTARA_PROXY_USER_HEADER")
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty());
+    match (mode, raw) {
+        (AuthMode::ProxyHeader, None) => anyhow::bail!(
+            "KINTARA_PROXY_USER_HEADER is required when KINTARA_AUTH_MODE=proxy-header"
+        ),
+        (AuthMode::ProxyHeader, Some(name)) => {
+            let lower = name.to_ascii_lowercase();
+            if !lower
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-')
+            {
+                anyhow::bail!("KINTARA_PROXY_USER_HEADER must be a valid header name (letters, digits, '-')");
+            }
+            Ok(Some(lower))
+        }
+        (_, _) => Ok(None),
+    }
+}
+
+fn proxy_admin_users_from_env() -> Vec<String> {
+    std::env::var("KINTARA_PROXY_ADMIN_USERS")
+        .map(|raw| {
+            raw.split(',')
+                .map(|s| s.trim().to_ascii_lowercase())
+                .filter(|s| !s.is_empty())
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Accepts the spellings people actually type in a compose file.

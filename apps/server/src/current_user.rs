@@ -7,13 +7,10 @@ use crate::state::AppState;
 
 /// The user a request acts as.
 ///
-/// Resolved from the session cookie. Handlers were written against this
-/// extractor from the start, so adding real authentication changed only this
-/// function rather than every route.
-///
-/// Resolved only from a valid Kintara session. First-run setup uses the public
-/// auth-status and GitHub callback routes, so the document API never needs an
-/// anonymous owner fallback.
+/// Resolved from the session cookie in OAuth mode. In `single-user` mode
+/// every request acts as the shared local owner without a session; in
+/// `proxy-header` mode the trusted reverse-proxy username header selects the
+/// account (auto-provisioned on first sight).
 #[derive(Debug, Clone, Copy)]
 pub struct CurrentUser(pub i64);
 
@@ -22,6 +19,37 @@ pub struct CurrentUser(pub i64);
 #[derive(Debug, Clone, Copy)]
 pub struct AuthenticatedUser(pub i64);
 
+async fn resolve_user_id(parts: &Parts, state: &AppState) -> Result<i64, AppError> {
+    use crate::config::AuthMode;
+    match state.config.auth_mode {
+        AuthMode::SingleUser => auth::ensure_no_auth_owner(state).await,
+        AuthMode::ProxyHeader => {
+            let header_name = state.config.proxy_user_header.as_deref().ok_or_else(|| {
+                AppError::Internal(anyhow::anyhow!("proxy user header not configured").into())
+            })?;
+            let raw = parts
+                .headers
+                .get(header_name)
+                .and_then(|v| v.to_str().ok())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| AppError::Unauthorized("missing trusted proxy user".into()))?;
+            auth::resolve_proxy_user(state, raw).await
+        }
+        AuthMode::Oauth => {
+            let session = parts
+                .headers
+                .get(axum::http::header::COOKIE)
+                .and_then(|value| value.to_str().ok())
+                .and_then(auth::session_from_cookies)
+                .ok_or_else(|| AppError::Unauthorized("sign in to continue".into()))?;
+            auth::user_for_session(state, &session)
+                .await?
+                .ok_or_else(|| AppError::Unauthorized("sign in to continue".into()))
+        }
+    }
+}
+
 impl FromRequestParts<AppState> for AuthenticatedUser {
     type Rejection = AppError;
 
@@ -29,16 +57,7 @@ impl FromRequestParts<AppState> for AuthenticatedUser {
         parts: &mut Parts,
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
-        let session = parts
-            .headers
-            .get(axum::http::header::COOKIE)
-            .and_then(|value| value.to_str().ok())
-            .and_then(auth::session_from_cookies)
-            .ok_or_else(|| AppError::Unauthorized("sign in to continue".into()))?;
-        let user_id = auth::user_for_session(state, &session)
-            .await?
-            .ok_or_else(|| AppError::Unauthorized("sign in to continue".into()))?;
-        Ok(Self(user_id))
+        Ok(Self(resolve_user_id(parts, state).await?))
     }
 }
 
@@ -49,15 +68,6 @@ impl FromRequestParts<AppState> for CurrentUser {
         parts: &mut Parts,
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
-        let session = parts
-            .headers
-            .get(axum::http::header::COOKIE)
-            .and_then(|value| value.to_str().ok())
-            .and_then(auth::session_from_cookies)
-            .ok_or_else(|| AppError::Unauthorized("sign in to continue".into()))?;
-        let user_id = auth::user_for_session(state, &session)
-            .await?
-            .ok_or_else(|| AppError::Unauthorized("sign in to continue".into()))?;
-        Ok(CurrentUser(user_id))
+        Ok(CurrentUser(resolve_user_id(parts, state).await?))
     }
 }

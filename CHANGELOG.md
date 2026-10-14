@@ -4,6 +4,23 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### 🏠 Homelab auth modes
+
+- Added optional `KINTARA_AUTH_MODE=single-user` (no login, one shared owner) and
+  `proxy-header` (trusted reverse-proxy username header with one auto-provisioned
+  account per value) for LAN use behind a proxy that already authenticates.
+- GitHub OAuth variables are ignored in homelab modes; switching modes needs only a
+  restart and keeps users, libraries and reading state.
+- The frontend skips the GitHub gate in homelab modes, hides sign-out and GitHub
+  invitations, and shows a proxy-header hint when the header is missing.
+
+### 🔒 Security
+
+- Fixed stored XSS in the Markdown reader: raw HTML in library documents no longer
+  renders as live elements, annotation highlights are painted with DOM APIs instead of
+  HTML string interpolation, and annotation colors are validated server-side
+  (hex or rgb()/rgba() only) with length caps on free-form fields.
+
 ## [1.13.9] - 2026-08-24
 
 ### 📱 Mobile

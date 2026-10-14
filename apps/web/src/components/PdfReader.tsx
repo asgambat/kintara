@@ -3,6 +3,7 @@ import { pdfAssetOptions, pdfjsLib } from "../lib/pdf";
 import { annotationService, documentService, documentUrls, type Annotation } from "../api";
 import { highlightBoxes, locatePassage, type TextPiece } from "../lib/pdf-text-locate";
 import { onHighlightRequest, onPageRequest, reportHighlight } from "../lib/reader-events";
+import { safeHighlightColor } from "../lib/highlight-color";
 import "./PdfReader.css";
 
 interface PdfReaderProps {
@@ -342,7 +343,7 @@ export const PdfReader: React.FC<PdfReaderProps> = ({ documentId }) => {
                   top: box.y * displayScale,
                   width: box.w * displayScale,
                   height: box.h * displayScale,
-                  backgroundColor: ann.color || "rgba(234, 179, 8, 0.4)",
+                  backgroundColor: safeHighlightColor(ann.color),
                   cursor: "pointer",
                   transition: "opacity 0.15s ease",
                 }}

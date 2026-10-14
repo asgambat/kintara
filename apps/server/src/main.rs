@@ -45,7 +45,15 @@ async fn main() -> Result<()> {
         scanner::spawn_watcher(state.clone());
     }
 
-    if auth::needs_owner(&state).await? {
+    if state.config.auth_mode.is_no_auth() {
+        let owner = auth::ensure_no_auth_owner(&state).await?;
+        tracing::warn!(
+            auth_mode = state.config.auth_mode.as_str(),
+            owner_id = owner,
+            "authentication is DISABLED (homelab mode): anyone who can reach this port has full access; \
+             make sure only your trusted reverse proxy can reach it and that it strips the trusted user header"
+        );
+    } else if auth::needs_owner(&state).await? {
         tracing::warn!(
             "no GitHub owner is linked — the first authorized GitHub sign-in \
              will claim the owner account"
