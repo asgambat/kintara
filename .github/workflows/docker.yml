@@ -16,23 +16,119 @@ env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
 
+# Each architecture is built on its own runner by the `build` matrix job,
+# pushed a single-platform manifest by digest, and the `merge` job assembles
+# them into the final multi-platform manifest list. This replaces the previous
+# single-job layout that built arm64 under QEMU emulation on an amd64 runner —
+# the dominant cost of the workflow, since every Rust crate compiles several
+# times slower under emulation. `ubuntu-24.04-arm` provides native ARM hardware
+# (free for public repositories).
 jobs:
   build:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
-      # Keyless cosign signing needs an OIDC identity.
-      id-token: write
+    runs-on: ${{ matrix.platform == 'linux/arm64' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - linux/amd64
+          - linux/arm64
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up QEMU
-        # arm64 is emulated on an amd64 runner. Plenty of NAS boxes are ARM,
-        # and retrofitting multi-arch later is more painful than starting here.
-        uses: docker/setup-qemu-action@v3
+      - name: Prepare runner-level metadata
+        run: |
+          platform=${{ matrix.platform }}
+          echo "PLATFORM_PAIR=${platform//\//-}" >> $GITHUB_ENV
+
+      # No QEMU step: `ubuntu-24.04-arm` is ARM native, `ubuntu-latest` is amd64
+      # native, so each job builds its own platform at full speed.
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Labels only: tags and latest semantics are applied once, in `merge`,
+      # to the assembled manifest list.
+      - name: Collect image labels
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+
+      # Registry cache scope is per architecture: the two matrix jobs run in
+      # parallel, and concurrent writes to one scope would race.
+      # `push-by-digest` publishes the single-platform manifest without a tag,
+      # so nothing is reachable until `merge` assembles the manifest list.
+      - name: Build and push by digest
+        if: github.event_name == 'push'
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile
+          platforms: ${{ matrix.platform }}
+          labels: ${{ steps.meta.outputs.labels }}
+          outputs: >-
+            type=image,
+            name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }},
+            push-by-digest=true,
+            name-canonical=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }},
+            push=true
+          cache-from: type=gha,scope=build-${{ env.PLATFORM_PAIR }}
+          cache-to: type=gha,mode=max,scope=build-${{ env.PLATFORM_PAIR }}
+
+      # workflow_dispatch builds for cache warm-up only, exactly as the old
+      # single-job workflow (which never pushed on dispatch). Nothing is
+      # published and the digest is not recorded.
+      - name: Build with cache export only
+        if: github.event_name != 'push'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile
+          platforms: ${{ matrix.platform }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=build-${{ env.PLATFORM_PAIR }}
+          cache-to: type=gha,mode=max,scope=build-${{ env.PLATFORM_PAIR }}
+
+      - name: Export digest
+        if: github.event_name == 'push'
+        run: |
+          mkdir -p ${{ runner.temp }}/digests
+          digest="${{ steps.build.outputs.digest }}"
+          touch "${{ runner.temp }}/digests/${digest#sha256:}"
+
+      - name: Upload digest
+        if: github.event_name == 'push'
+        uses: actions/upload-artifact@v4
+        with:
+          name: digests-${{ env.PLATFORM_PAIR }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  # Referenced by digest only, so `merge` never rebuilds: it reads the two
+  # single-platform manifests, turns them into one manifest list, and pushes it
+  # under the tags derived from the event (version, major.minor, latest).
+  merge:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    needs: build
+
+    steps:
+      - name: Download digests
+        uses: actions/download-artifact@v4
+        with:
+          path: ${{ runner.temp }}/digests
+          pattern: digests-*
+          merge-multiple: true
 
       - name: Set up Buildx
         uses: docker/setup-buildx-action@v3
@@ -54,30 +150,29 @@ jobs:
             type=semver,pattern={{major}}.{{minor}}
             type=raw,value=latest,enable={{is_default_branch}}
 
-      - name: Build and push
-        id: build
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: docker/Dockerfile
-          platforms: linux/amd64,linux/arm64
-          push: ${{ github.event_name == 'push' }}
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          # Without this the Rust dependency build is redone from scratch on
-          # every run, for both architectures.
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+      - name: Push manifest list
+        working-directory: ${{ runner.temp }}/digests
+        run: |
+          docker buildx imagetools create \
+            $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
+            $(printf "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@sha256:%s " *)
+
+      - name: Inspect image
+        run: |
+          docker buildx imagetools inspect \
+            "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }}"
 
       - name: Install cosign
-        if: github.event_name == 'push'
         uses: sigstore/cosign-installer@v3
 
-      # Keyless (OIDC) signature over the published digest, so anyone pulling
-      # from GHCR can verify the image was built by this workflow.
+      # Keyless (OIDC) signature over the published manifest-list digest, so
+      # anyone pulling from GHCR can verify the image was built by this
+      # workflow. `cosign sign` requires a digest reference; the digest of the
+      # manifest list is the sha256 of its raw bytes, which `--raw` returns.
       # `cosign verify ghcr.io/<repo>@<digest> --certificate-identity-regexp '.*' --certificate-oidc-issuer https://token.actions.githubusercontent.com`
       - name: Sign image
-        if: github.event_name == 'push'
         env:
-          DIGEST: ${{ steps.build.outputs.digest }}
-        run: cosign sign --yes "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${DIGEST}"
+          REF: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }}
+        run: |
+          digest=$(docker buildx imagetools inspect --raw "${REF}" | sha256sum | cut -d' ' -f1)
+          cosign sign --yes "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@sha256:${digest}"

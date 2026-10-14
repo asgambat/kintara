@@ -20,12 +20,14 @@ RUN npm run build --workspace apps/web
 # cargo-chef records just the dependency graph, so the expensive dependency
 # build below is cached until Cargo.toml actually changes rather than being
 # redone every time a source file is touched.
-FROM rust:1.96-bookworm AS chef
-# Registry/git cache mounts survive layer invalidation: even when Cargo.toml
-# changes, only the delta is downloaded instead of the whole registry index.
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/usr/local/cargo/git \
-    cargo install cargo-chef --locked
+#
+# Use the official prebuilt image instead of `cargo install cargo-chef`:
+# that install compiles cargo-chef and its full dependency tree from source
+# on every cache miss — for both platforms, arm64 included, where everything
+# runs under QEMU emulation. This image ships the same Rust toolchain as our
+# base (`rust:1.96-bookworm`) with cargo-chef already present, for amd64 and
+# arm64, so the planner starts in seconds.
+FROM lukemathwalker/cargo-chef:latest-rust-1.96-bookworm AS chef
 WORKDIR /build
 
 FROM chef AS planner

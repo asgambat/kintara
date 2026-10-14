@@ -417,6 +417,10 @@ the request. Kintara does not run automatic or background AI processing.
 
 Install Rust, Node.js, and `poppler-utils`.
 
+For the build, lint, and test commands used to verify changes, see
+[`AGENTS.md`](AGENTS.md). To run the server in development with sample data, see
+its *Local development with sample data* section.
+
 ```bash
 npm install
 npm run dev
