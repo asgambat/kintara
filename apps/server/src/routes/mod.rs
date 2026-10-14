@@ -18,6 +18,7 @@ use std::time::Duration;
 
 use axum::Router;
 use axum::http::HeaderValue;
+use axum::http::StatusCode;
 use axum::middleware::{self, Next};
 use axum::response::Response;
 use axum::routing::{get, post};
@@ -43,7 +44,7 @@ async fn api_not_found() -> AppError {
 /// clients already bound them (90 s text, 180 s images), and a shorter route
 /// timeout here would break image generation.
 fn api_timeout() -> TimeoutLayer {
-    TimeoutLayer::new(Duration::from_secs(120))
+    TimeoutLayer::with_status_code(StatusCode::REQUEST_TIMEOUT, Duration::from_secs(120))
 }
 
 pub fn router(state: AppState) -> Router {

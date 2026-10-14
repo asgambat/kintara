@@ -141,7 +141,8 @@ impl Config {
     /// Creates the directories the server writes to. The library directory is
     /// included because a first run against an empty volume is normal.
     pub fn ensure_dirs(&self) -> Result<()> {
-        let mut dirs = vec![&self.library_dir, &self.data_dir, &self.thumbnail_dir()];
+        let thumbnail_dir = self.thumbnail_dir();
+        let mut dirs = vec![&self.library_dir, &self.data_dir, &thumbnail_dir];
         dirs.extend(self.extra_library_dirs.iter());
         for dir in dirs {
             std::fs::create_dir_all(dir)

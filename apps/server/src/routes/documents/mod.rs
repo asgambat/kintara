@@ -8,6 +8,7 @@ use axum::extract::{DefaultBodyLimit, Path, Query, State};
 use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use sqlx::{QueryBuilder, Sqlite};
+use axum::http::StatusCode;
 use tower_http::compression::CompressionLayer;
 use tower_http::timeout::TimeoutLayer;
 
@@ -38,7 +39,10 @@ pub fn router(max_upload_bytes: usize) -> Router<AppState> {
             "/{id}/annotations",
             get(crate::routes::annotations::for_document),
         )
-        .layer(TimeoutLayer::new(Duration::from_secs(120)))
+        .layer(TimeoutLayer::with_status_code(
+            StatusCode::REQUEST_TIMEOUT,
+            Duration::from_secs(120),
+        ))
         .layer(CompressionLayer::new());
 
     // Uploads stream for as long as the client needs: a 1 GB scan over a slow
