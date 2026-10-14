@@ -41,6 +41,7 @@ impl TestApp {
             scan_on_start: false,
             watch: false,
             max_upload_bytes: 64 * 1024 * 1024,
+            extra_library_dirs: Vec::new(),
             github_oauth: None,
             auth_mode: kintara_server::config::AuthMode::Oauth,
             local_user: "local".to_string(),

@@ -371,10 +371,13 @@ fn extension_of(filename: &str) -> String {
         .unwrap_or_default()
 }
 
-/// Finds a free path for `filename`, appending ` (2)`, ` (3)` and so on.
+/// Finds a free path for `filename` on the primary root, appending ` (2)`,
+/// ` (3)` and so on.
 ///
 /// Two different documents can legitimately share a filename, and
-/// `relative_path` is UNIQUE, so a collision must not fail the upload.
+/// `(root_id, relative_path)` is UNIQUE, so a collision must not fail the
+/// upload. Uploads always land on the primary root; extra roots are
+/// populated by dropping files there directly (the scanner picks them up).
 async fn unique_relative_path(state: &AppState, filename: &str) -> AppResult<String> {
     let path = StdPath::new(filename);
     let stem = path
@@ -390,11 +393,12 @@ async fn unique_relative_path(state: &AppState, filename: &str) -> AppResult<Str
             format!("{stem} ({attempt}).{extension}")
         };
 
-        let taken: Option<i64> =
-            sqlx::query_scalar("SELECT id FROM documents WHERE relative_path = ?")
-                .bind(&candidate)
-                .fetch_optional(&state.db)
-                .await?;
+        let taken: Option<i64> = sqlx::query_scalar(
+            "SELECT id FROM documents WHERE root_id = 0 AND relative_path = ?",
+        )
+        .bind(&candidate)
+        .fetch_optional(&state.db)
+        .await?;
 
         if taken.is_none() && !state.config.library_dir.join(&candidate).exists() {
             return Ok(candidate);

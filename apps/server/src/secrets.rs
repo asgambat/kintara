@@ -118,6 +118,7 @@ mod tests {
     fn config(dir: &tempfile::TempDir) -> Config {
         Config {
             library_dir: dir.path().join("library"),
+            extra_library_dirs: Vec::new(),
             data_dir: dir.path().to_path_buf(),
             web_dir: dir.path().join("web"),
             bind: "127.0.0.1:0".parse().unwrap(),

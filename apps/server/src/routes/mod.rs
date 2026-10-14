@@ -14,11 +14,14 @@ pub mod libraries;
 pub mod tags;
 pub mod users;
 
+use std::time::Duration;
+
 use axum::Router;
 use axum::routing::{get, post};
 use tower::Layer;
 use tower_http::compression::CompressionLayer;
 use tower_http::services::{ServeDir, ServeFile};
+use tower_http::timeout::TimeoutLayer;
 use tower_http::trace::TraceLayer;
 
 use crate::error::AppError;
@@ -31,11 +34,20 @@ async fn api_not_found() -> AppError {
     AppError::NotFound
 }
 
+/// Ceiling for JSON API calls. Streaming document bytes and uploads are
+/// deliberately excluded (see `documents::router`): a slow link legitimately
+/// takes longer than this. AI calls are excluded too — the inner reqwest
+/// clients already bound them (90 s text, 180 s images), and a shorter route
+/// timeout here would break image generation.
+fn api_timeout() -> TimeoutLayer {
+    TimeoutLayer::new(Duration::from_secs(120))
+}
+
 pub fn router(state: AppState) -> Router {
     let api = Router::new()
         .route("/health", get(health::health))
-        .nest("/auth", auth::router())
-        .route("/me", get(auth::me))
+        .nest("/auth", auth::router().layer(api_timeout()))
+        .route("/me", get(auth::me).route_layer(api_timeout()))
         .nest(
             "/ai",
             ai::router()
@@ -50,15 +62,15 @@ pub fn router(state: AppState) -> Router {
             "/documents",
             documents::router(state.config.max_upload_bytes),
         )
-        .nest("/libraries", libraries::router())
-        .nest("/collections", collections::router())
-        .nest("/tags", tags::router())
-        .route("/users", get(users::list_access))
-        .nest("/users", users::router())
-        .route("/annotations", post(annotations::create))
+        .nest("/libraries", libraries::router().layer(api_timeout()))
+        .nest("/collections", collections::router().layer(api_timeout()))
+        .nest("/tags", tags::router().layer(api_timeout()))
+        .route("/users", get(users::list_access).route_layer(api_timeout()))
+        .nest("/users", users::router().layer(api_timeout()))
+        .route("/annotations", post(annotations::create).route_layer(api_timeout()))
         .route(
             "/annotations/{id}",
-            axum::routing::delete(annotations::delete),
+            axum::routing::delete(annotations::delete).route_layer(api_timeout()),
         )
         .fallback(api_not_found)
         .with_state(state.clone());

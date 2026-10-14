@@ -129,6 +129,23 @@ function pdfjsAssets(): Plugin {
 export default defineConfig(async () => ({
   plugins: [react(), brandAssets(), pdfjsAssets()],
 
+  build: {
+    // The single index bundle used to pass 1 MB: pdf.js rides with the first
+    // paint even though it is only needed once a PDF is opened, and React
+    // itself never changes independently. Splitting them keeps the initial
+    // download to app code. (Shiki splits itself: MarkdownReader imports it
+    // dynamically on the first fenced code block.)
+    chunkSizeWarningLimit: 1000,
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          pdfjs: ["pdfjs-dist"],
+          vendor: ["react", "react-dom"],
+        },
+      },
+    },
+  },
+
   // `npm run dev` runs the Rust server alongside Vite, so the screen must not be
   // cleared out from under cargo's errors.
   clearScreen: false,

@@ -2,11 +2,14 @@ mod content;
 mod mutate;
 mod upload;
 
+use std::time::Duration;
+
 use axum::extract::{DefaultBodyLimit, Path, Query, State};
 use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use sqlx::{QueryBuilder, Sqlite};
 use tower_http::compression::CompressionLayer;
+use tower_http::timeout::TimeoutLayer;
 
 use crate::current_user::CurrentUser;
 use crate::error::{AppError, AppResult};
@@ -14,14 +17,11 @@ use crate::models::{Document, DocumentRow, ListQuery, Page, Search};
 use crate::state::AppState;
 
 pub fn router(max_upload_bytes: usize) -> Router<AppState> {
-    // JSON metadata: small, repetitive, worth compressing.
-    let metadata = Router::new()
-        .route(
-            "/",
-            get(list)
-                .post(upload::upload)
-                .layer(DefaultBodyLimit::max(max_upload_bytes)),
-        )
+    // JSON metadata: small, repetitive, worth compressing. Reads share a
+    // 120 s ceiling so a hung NAS or database can never hold a worker
+    // forever; the client sees a 408 and can retry.
+    let reads = Router::new()
+        .route("/", get(list))
         .route(
             "/{id}",
             get(get_one).patch(mutate::update).delete(mutate::delete),
@@ -38,12 +38,22 @@ pub fn router(max_upload_bytes: usize) -> Router<AppState> {
             "/{id}/annotations",
             get(crate::routes::annotations::for_document),
         )
+        .layer(TimeoutLayer::new(Duration::from_secs(120)))
+        .layer(CompressionLayer::new());
+
+    // Uploads stream for as long as the client needs: a 1 GB scan over a slow
+    // link legitimately takes longer than any API ceiling, so no timeout
+    // here. The size ceiling still applies per route.
+    let writes = Router::new()
+        .route(
+            "/",
+            post(upload::upload).layer(DefaultBodyLimit::max(max_upload_bytes)),
+        )
         .route(
             "/{id}/cover",
             // Covers are images; a much smaller ceiling than whole documents.
             post(upload::upload_cover).layer(DefaultBodyLimit::max(32 * 1024 * 1024)),
-        )
-        .layer(CompressionLayer::new());
+        );
 
     // Document bytes: served by ServeFile with Range support, and never
     // compressed. See the note in routes::router.
@@ -52,7 +62,7 @@ pub fn router(max_upload_bytes: usize) -> Router<AppState> {
         .route("/{id}/thumbnail", get(content::thumbnail))
         .route("/{id}/download", get(content::download));
 
-    metadata.merge(content)
+    reads.merge(writes).merge(content)
 }
 
 /// Columns shared by the list and single-document queries.

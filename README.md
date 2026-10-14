@@ -211,6 +211,7 @@ to the account that uploaded them.
 | `KINTARA_LOCAL_USER` | `local` | Username of the shared owner in homelab modes |
 | `KINTARA_PROXY_USER_HEADER` | none | Trusted username header for `proxy-header` mode, e.g. `X-Forwarded-User` |
 | `KINTARA_PROXY_ADMIN_USERS` | none | Comma-separated usernames always admin in `proxy-header` mode |
+| `KINTARA_EXTRA_LIBRARY_DIRS` | none | Colon-separated extra library roots scanned alongside `/library` |
 | `KINTARA_SECRET` | generated file | Optional provider-key encryption source of 32 or more characters |
 
 GitHub login stays disabled unless all three OAuth variables are set. Kintara stops during
@@ -230,6 +231,25 @@ with the database. Saved OpenAI and Google keys cannot be decrypted without it.
 Some network shares do not report filesystem events. Set `KINTARA_WATCH: "false"` if the
 watcher cannot follow your share. Keep `KINTARA_SCAN_ON_START` enabled so each restart
 finds changes.
+
+## Multiple library roots
+
+Besides `/library`, Kintara can scan extra roots (a second NAS share, an archive disk):
+
+```yaml
+volumes:
+  - /volume1/documents:/library
+  - /volume2/archive:/archive:ro
+
+environment:
+  KINTARA_EXTRA_LIBRARY_DIRS: /archive
+```
+
+Separate entries with `:` for more roots (`/archive:/media/books`). Paths containing
+`:` are not supported. Every root is scanned at startup and watched live; identity is
+`(root, relative path)`, so the same filename may exist on two roots. Browser uploads
+always land on the primary `/library`. Removing a root from the configuration hides its
+documents (their rows stay in the database until you re-add the root or delete them).
 
 ## Reverse proxies
 
@@ -429,7 +449,7 @@ scripts/    Project checks and asset utilities
 ## Known limits
 
 - The PDF reader has no pinch zoom or swipe paging.
-- Kintara supports one document root per installation.
+- Kintara scans one primary root plus optional extra roots (`KINTARA_EXTRA_LIBRARY_DIRS`).
 - Kintara does not provide an OPDS feed.
 
 ## License

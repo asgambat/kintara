@@ -140,13 +140,13 @@ pub async fn resolve_proxy_user(state: &AppState, raw: &str) -> AppResult<i64> {
     let username = normalize_proxy_username(raw).ok_or_else(|| {
         crate::error::AppError::Unauthorized("invalid proxy username".into())
     })?;
-    if let Some((id, is_admin)): Option<(i64, i64)> = sqlx::query_as(
+    let existing: Option<(i64, i64)> = sqlx::query_as(
         "SELECT id, is_admin FROM users WHERE username = ? COLLATE NOCASE",
     )
     .bind(&username)
     .fetch_optional(&state.db)
-    .await?
-    {
+    .await?;
+    if let Some((id, is_admin)) = existing {
         let lower = username.to_ascii_lowercase();
         if state.config.proxy_admin_users.iter().any(|a| a == &lower) && is_admin == 0 {
             sqlx::query("UPDATE users SET is_admin = 1 WHERE id = ?")

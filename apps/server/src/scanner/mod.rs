@@ -18,62 +18,78 @@ pub use index::{is_indexable, Outcome};
 /// Runs at startup because files arrive over SMB while the server is down, and
 /// because the watcher only ever reports changes it was running for.
 pub async fn full_scan(state: &AppState) -> AppResult<()> {
-    let root = state.config.library_dir.clone();
-    tracing::info!(root = %root.display(), "scanning library");
+    let roots = state.config.all_library_roots();
+    tracing::info!(roots = roots.len(), "scanning libraries");
 
-    let files: Vec<PathBuf> = tokio::task::spawn_blocking(move || {
-        WalkDir::new(&root)
-            .follow_links(false)
-            .into_iter()
-            .filter_map(Result::ok)
-            .filter(|entry| entry.file_type().is_file())
-            .map(|entry| entry.into_path())
-            .filter(|path| index::is_indexable(path))
-            // Skip @eaDir, #recycle and friends, which NAS software keeps
-            // beside your files and which would otherwise fill the library.
-            .filter(|path| {
-                index::relative_to_root(&root, path)
-                    .map(|rel| !index::is_ignored_relative(&rel))
-                    .unwrap_or(false)
-            })
-            .collect()
-    })
-    .await
-    .map_err(|err| crate::error::AppError::Internal(err.into()))?;
-
-    let mut seen: HashSet<String> = HashSet::new();
+    let mut seen: HashSet<(i64, String)> = HashSet::new();
     let mut added = 0usize;
     let mut updated = 0usize;
+    let mut scanned = 0usize;
 
-    for path in &files {
-        if let Some(relative) = index::relative_to_root(&state.config.library_dir, path) {
-            seen.insert(relative);
-        }
-        match index::index_file(state, path).await {
-            Ok(Outcome::Added(_)) => added += 1,
-            Ok(Outcome::Updated(_)) => updated += 1,
-            Ok(Outcome::Skipped) => {}
-            Err(err) => tracing::warn!(path = %path.display(), ?err, "failed to index"),
+    for (root_id, root) in &roots {
+        let root_id = *root_id;
+        tracing::info!(root_id, root = %root.display(), "scanning library");
+        let walk_root = root.clone();
+        let files: Vec<PathBuf> = tokio::task::spawn_blocking(move || {
+            WalkDir::new(&walk_root)
+                .follow_links(false)
+                .into_iter()
+                .filter_map(Result::ok)
+                .filter(|entry| entry.file_type().is_file())
+                .map(|entry| entry.into_path())
+                .filter(|path| index::is_indexable(path))
+                // Skip @eaDir, #recycle and friends, which NAS software keeps
+                // beside your files and which would otherwise fill the library.
+                .filter(|path| {
+                    index::relative_to_root(&walk_root, path)
+                        .map(|rel| !index::is_ignored_relative(&rel))
+                        .unwrap_or(false)
+                })
+                .collect()
+        })
+        .await
+        .map_err(|err| crate::error::AppError::Internal(err.into()))?;
+
+        scanned += files.len();
+        for path in &files {
+            if let Some((id, relative)) = index::root_id_for_path(&state.config, path) {
+                debug_assert_eq!(id, root_id);
+                seen.insert((id, relative));
+            }
+            match index::index_file(state, path).await {
+                Ok(Outcome::Added(_)) => added += 1,
+                Ok(Outcome::Updated(_)) => updated += 1,
+                Ok(Outcome::Skipped) => {}
+                Err(err) => tracing::warn!(path = %path.display(), ?err, "failed to index"),
+            }
         }
     }
 
     // Anything indexed but no longer on disk was deleted while the server was
     // down, or straight off the share.
-    let known: Vec<String> = sqlx::query_scalar("SELECT relative_path FROM documents")
-        .fetch_all(&state.db)
-        .await?;
+    let known: Vec<(i64, String)> =
+        sqlx::query_as("SELECT root_id, relative_path FROM documents")
+            .fetch_all(&state.db)
+            .await?;
 
+    // Rows whose root is not configured anymore (entry removed, share
+    // unmounted) are left alone: the files may come back, and forgetting them
+    // would silently wipe the library on a transient mount failure.
+    let configured: HashSet<i64> = roots.iter().map(|(id, _)| *id).collect();
     let mut removed = 0usize;
-    for relative in known {
-        if !seen.contains(&relative) {
-            if index::forget_path(state, &relative).await? {
+    for (root_id, relative) in known {
+        if !configured.contains(&root_id) {
+            continue;
+        }
+        if !seen.contains(&(root_id, relative.clone())) {
+            if index::forget_path(state, root_id, &relative).await? {
                 removed += 1;
             }
         }
     }
 
     tracing::info!(
-        scanned = files.len(),
+        scanned,
         added,
         updated,
         removed,
@@ -88,7 +104,7 @@ pub async fn full_scan(state: &AppState) -> AppResult<()> {
 /// reacting to each one would hash and re-thumbnail a file that is still being
 /// written. The watcher runs for the life of the process.
 pub fn spawn_watcher(state: AppState) {
-    let root = state.config.library_dir.clone();
+    let roots = state.config.all_library_roots();
 
     tokio::spawn(async move {
         let (tx, mut rx) = mpsc::unbounded_channel::<notify::Event>();
@@ -107,12 +123,20 @@ pub fn spawn_watcher(state: AppState) {
             }
         };
 
-        if let Err(err) = watcher.watch(&root, RecursiveMode::Recursive) {
-            tracing::warn!(%err, root = %root.display(), "could not watch the library");
+        let mut watched = 0usize;
+        for (_, root) in &roots {
+            if let Err(err) = watcher.watch(root, RecursiveMode::Recursive) {
+                tracing::warn!(%err, root = %root.display(), "could not watch the library");
+            } else {
+                watched += 1;
+            }
+        }
+        if watched == 0 {
+            tracing::warn!("could not watch any library; new files will only appear after a restart");
             return;
         }
 
-        tracing::info!(root = %root.display(), "watching library for changes");
+        tracing::info!(watched, "watching libraries for changes");
 
         let mut pending: HashSet<PathBuf> = HashSet::new();
 
@@ -137,8 +161,12 @@ pub fn spawn_watcher(state: AppState) {
                     continue;
                 }
 
-                let relative = index::relative_to_root(&state.config.library_dir, &path);
-                if relative.as_deref().map(index::is_ignored_relative).unwrap_or(true) {
+                let located = index::root_id_for_path(&state.config, &path);
+                if located
+                    .as_ref()
+                    .map(|(_, relative)| index::is_ignored_relative(relative))
+                    .unwrap_or(true)
+                {
                     continue;
                 }
 
@@ -146,8 +174,8 @@ pub fn spawn_watcher(state: AppState) {
                     if let Err(err) = index::index_file(&state, &path).await {
                         tracing::warn!(path = %path.display(), ?err, "failed to index");
                     }
-                } else if let Some(relative) = relative {
-                    if let Err(err) = index::forget_path(&state, &relative).await {
+                } else if let Some((root_id, relative)) = located {
+                    if let Err(err) = index::forget_path(&state, root_id, &relative).await {
                         tracing::warn!(%relative, ?err, "failed to remove");
                     }
                 }

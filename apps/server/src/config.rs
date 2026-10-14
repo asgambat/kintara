@@ -47,9 +47,13 @@ impl AuthMode {
 /// paths (`/library`, `/data`, `/app/web`).
 #[derive(Debug, Clone)]
 pub struct Config {
-    /// Root of the document library. Every `documents.relative_path` in the
-    /// database is resolved against this, which is what lets the volume move.
+    /// Primary root of the document library. Every `documents.relative_path`
+    /// with `root_id = 0` is resolved against this, which is what lets the
+    /// volume move. Uploads always land here.
     pub library_dir: PathBuf,
+    /// Additional read roots scanned and watched alongside the primary one.
+    /// `documents.root_id` is the index into `[library_dir, ..extra_library_dirs]`.
+    pub extra_library_dirs: Vec<PathBuf>,
     /// Holds the SQLite database and generated thumbnails. Kept separate from
     /// `library_dir` because that one is typically also a network share, and
     /// SQLite over SMB/NFS corrupts.
@@ -84,6 +88,7 @@ pub struct Config {
 impl Config {
     pub fn from_env() -> Result<Self> {
         let library_dir = path_var("KINTARA_LIBRARY_DIR", "./data/library");
+        let extra_library_dirs = extra_dirs_var("KINTARA_EXTRA_LIBRARY_DIRS");
         let data_dir = path_var("KINTARA_DATA_DIR", "./data");
         let web_dir = path_var("KINTARA_WEB_DIR", "../web/dist");
 
@@ -108,6 +113,7 @@ impl Config {
 
         Ok(Self {
             library_dir,
+            extra_library_dirs,
             data_dir,
             web_dir,
             bind,
@@ -129,11 +135,40 @@ impl Config {
     /// Creates the directories the server writes to. The library directory is
     /// included because a first run against an empty volume is normal.
     pub fn ensure_dirs(&self) -> Result<()> {
-        for dir in [&self.library_dir, &self.data_dir, &self.thumbnail_dir()] {
+        let mut dirs = vec![&self.library_dir, &self.data_dir, &self.thumbnail_dir()];
+        dirs.extend(self.extra_library_dirs.iter());
+        for dir in dirs {
             std::fs::create_dir_all(dir)
                 .with_context(|| format!("failed to create directory {}", dir.display()))?;
         }
         Ok(())
+    }
+
+    /// Every scan root as `(root_id, path)`. Root 0 is always the primary
+    /// `library_dir`; extras follow in configuration order.
+    pub fn all_library_roots(&self) -> Vec<(i64, PathBuf)> {
+        let mut roots = vec![(0, self.library_dir.clone())];
+        roots.extend(
+            self.extra_library_dirs
+                .iter()
+                .cloned()
+                .enumerate()
+                .map(|(i, dir)| (i as i64 + 1, dir)),
+        );
+        roots
+    }
+
+    /// Filesystem root for a stored `documents.root_id`, or `None` when the
+    /// configuration no longer contains that root (e.g. an env entry was
+    /// removed). Callers treat that as not-found rather than an error.
+    pub fn root_dir(&self, root_id: i64) -> Option<&std::path::Path> {
+        if root_id == 0 {
+            Some(&self.library_dir)
+        } else {
+            self.extra_library_dirs
+                .get((root_id - 1) as usize)
+                .map(PathBuf::as_path)
+        }
     }
 
     pub fn thumbnail_dir(&self) -> PathBuf {
@@ -257,6 +292,21 @@ fn bool_var(key: &str, default: bool) -> bool {
         ),
         Err(_) => default,
     }
+}
+
+/// Colon-separated extra library roots (`PATH` convention). Empty entries are
+/// skipped; relative paths resolve against the process working directory like
+/// `KINTARA_LIBRARY_DIR` does. Paths containing `:` are not supported.
+fn extra_dirs_var(key: &str) -> Vec<PathBuf> {
+    std::env::var(key)
+        .map(|raw| {
+            raw.split(':')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(PathBuf::from)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn path_var(key: &str, default: &str) -> PathBuf {

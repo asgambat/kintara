@@ -1,7 +1,6 @@
 import React, { useEffect, useState, useRef, useCallback } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { codeToHtml } from "shiki";
 import { annotationService, documentService, type Annotation } from "../api";
 import { onHighlightRequest, reportHighlight } from "../lib/reader-events";
 import { safeHighlightColor } from "../lib/highlight-color";
@@ -263,12 +262,21 @@ export const MarkdownReader: React.FC<MarkdownReaderProps> = ({ documentId }) =>
 
             useEffect(() => {
               if (!inline && match) {
+                // Imported lazily so the Shiki grammars (~hundreds of KB) only
+                // download when a fenced code block is actually rendered.
                 // Shiki escapes the code it highlights, so this HTML is
                 // generated from text — not from document markup.
-                codeToHtml(String(children).replace(/\n$/, ""), {
-                  lang: match[1],
-                  theme: "github-dark",
-                }).then(setHighlightedCode, () => undefined);
+                let cancelled = false;
+                import("shiki").then(({ codeToHtml }) =>
+                  codeToHtml(String(children).replace(/\n$/, ""), {
+                    lang: match[1],
+                    theme: "github-dark",
+                  }).then(
+                    (html) => { if (!cancelled) setHighlightedCode(html); },
+                    () => undefined,
+                  ),
+                );
+                return () => { cancelled = true; };
               }
             }, [match, children, inline]);
 

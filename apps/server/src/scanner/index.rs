@@ -88,6 +88,21 @@ pub fn relative_to_root(root: &Path, path: &Path) -> Option<String> {
         .map(|p| p.to_string())
 }
 
+/// Finds which configured library root holds `path`, primary first.
+/// Returns the stored `(root_id, relative_path)` pair, or `None` for paths
+/// outside every root (uploads in flight, thumbnails, temp files).
+pub fn root_id_for_path(
+    config: &crate::config::Config,
+    path: &Path,
+) -> Option<(i64, String)> {
+    config
+        .all_library_roots()
+        .into_iter()
+        .find_map(|(root_id, root)| {
+            relative_to_root(&root, path).map(|relative| (root_id, relative))
+        })
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum Outcome {
     Added(i64),
@@ -102,7 +117,7 @@ pub enum Outcome {
 /// whose hash already exists elsewhere in the library is skipped rather than
 /// duplicated, which is what stops a copy of a paper becoming a second entry.
 pub async fn index_file(state: &AppState, path: &Path) -> AppResult<Outcome> {
-    let Some(relative_path) = relative_to_root(&state.config.library_dir, path) else {
+    let Some((root_id, relative_path)) = root_id_for_path(&state.config, path) else {
         return Ok(Outcome::Skipped);
     };
 
@@ -127,8 +142,10 @@ pub async fn index_file(state: &AppState, path: &Path) -> AppResult<Outcome> {
     }
 
     let existing: Option<(i64, Option<String>, Option<String>)> = sqlx::query_as(
-        "SELECT id, file_hash, text_extracted_at FROM documents WHERE relative_path = ?",
+        "SELECT id, file_hash, text_extracted_at
+         FROM documents WHERE root_id = ? AND relative_path = ?",
     )
+    .bind(root_id)
     .bind(&relative_path)
     .fetch_optional(&state.db)
     .await?;
@@ -146,45 +163,49 @@ pub async fn index_file(state: &AppState, path: &Path) -> AppResult<Outcome> {
         return Ok(Outcome::Updated(id));
     }
 
-    // Same content under a different path — a copy, or a rename the watcher saw
-    // as a create. Move the existing row rather than duplicating it.
-    let moved: Option<i64> =
-        sqlx::query_scalar("SELECT id FROM documents WHERE file_hash = ? AND relative_path != ?")
-            .bind(&hash)
-            .bind(&relative_path)
-            .fetch_optional(&state.db)
-            .await?;
+    // Same content under a different path — a copy, a rename the watcher saw
+    // as a create, or a move between library roots. Move the existing row
+    // rather than duplicating it.
+    let moved: Option<(i64, i64, String)> = sqlx::query_as(
+        "SELECT id, root_id, relative_path FROM documents
+         WHERE file_hash = ? AND NOT (root_id = ? AND relative_path = ?)",
+    )
+    .bind(&hash)
+    .bind(root_id)
+    .bind(&relative_path)
+    .fetch_optional(&state.db)
+    .await?;
 
-    if let Some(id) = moved {
-        let still_there: Option<String> =
-            sqlx::query_scalar("SELECT relative_path FROM documents WHERE id = ?")
+    if let Some((id, old_root, old_relative)) = moved {
+        // If the old path is gone this was a rename (possibly across roots);
+        // if it still exists this is a genuine duplicate and there is nothing
+        // to do.
+        let gone = state
+            .config
+            .root_dir(old_root)
+            .map(|root| !root.join(&old_relative).exists())
+            .unwrap_or(false);
+        if gone {
+            sqlx::query("UPDATE documents SET root_id = ?, relative_path = ? WHERE id = ?")
+                .bind(root_id)
+                .bind(&relative_path)
                 .bind(id)
-                .fetch_one(&state.db)
+                .execute(&state.db)
                 .await?;
-
-        // If the old path is gone this was a rename; if it still exists this is
-        // a genuine duplicate and there is nothing to do.
-        if let Some(old) = still_there {
-            if !state.config.library_dir.join(&old).exists() {
-                sqlx::query("UPDATE documents SET relative_path = ? WHERE id = ?")
-                    .bind(&relative_path)
-                    .bind(id)
-                    .execute(&state.db)
-                    .await?;
-                tracing::info!(%old, new = %relative_path, "document moved");
-                return Ok(Outcome::Updated(id));
-            }
+            tracing::info!(%old_relative, new = %relative_path, "document moved");
+            return Ok(Outcome::Updated(id));
         }
         return Ok(Outcome::Skipped);
     }
 
     Ok(Outcome::Added(
-        add(state, path, &relative_path, &hash, size).await?,
+        add(state, root_id, path, &relative_path, &hash, size).await?,
     ))
 }
 
 async fn add(
     state: &AppState,
+    root_id: i64,
     path: &Path,
     relative_path: &str,
     hash: &str,
@@ -211,12 +232,13 @@ async fn add(
 
     let id: i64 = sqlx::query_scalar(
         "INSERT INTO documents
-            (owner_id, title, author, relative_path, document_type, file_hash, file_size,
+            (owner_id, root_id, title, author, relative_path, document_type, file_hash, file_size,
              keywords, page_count, year, indexed_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
          RETURNING id",
     )
     .bind(owner_id)
+    .bind(root_id)
     .bind(&title)
     .bind(&metadata.author)
     .bind(relative_path)
@@ -295,12 +317,14 @@ async fn refresh(state: &AppState, id: i64, path: &Path, hash: &str, size: i64) 
 }
 
 /// Removes a document whose file has gone from the library.
-pub async fn forget_path(state: &AppState, relative_path: &str) -> AppResult<bool> {
-    let row: Option<(i64, Option<String>)> =
-        sqlx::query_as("SELECT id, thumbnail_name FROM documents WHERE relative_path = ?")
-            .bind(relative_path)
-            .fetch_optional(&state.db)
-            .await?;
+pub async fn forget_path(state: &AppState, root_id: i64, relative_path: &str) -> AppResult<bool> {
+    let row: Option<(i64, Option<String>)> = sqlx::query_as(
+        "SELECT id, thumbnail_name FROM documents WHERE root_id = ? AND relative_path = ?",
+    )
+    .bind(root_id)
+    .bind(relative_path)
+    .fetch_optional(&state.db)
+    .await?;
 
     let Some((id, thumbnail)) = row else {
         return Ok(false);

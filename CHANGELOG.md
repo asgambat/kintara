@@ -4,6 +4,24 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### ⚙️ Reliability and libraries
+
+- Multiple library roots: `KINTARA_EXTRA_LIBRARY_DIRS` adds colon-separated roots
+  scanned and watched alongside `/library`; uploads still land on the primary root.
+  Documents removed with their root unconfigured are hidden, not deleted.
+- The database is copied to `<data_dir>/backups` (last 5 kept) before pending
+  migrations run, so a bad migration can be undone by swapping the file back.
+- JSON API routes now time out after 120 s; document bytes, thumbnails, uploads and
+  AI calls (already bounded by their own clients) are excluded.
+- Faster first paint: pdf.js and React ship as separate chunks and Shiki loads
+  lazily on the first code block.
+
+### 🤖 CI and supply chain
+
+- New CI workflow: Rust clippy + tests, web typecheck/build/tests, and
+  `cargo-audit` + `npm audit`.
+- Container images are now signed with keyless cosign (OIDC) on every push.
+
 ### 🏠 Homelab auth modes
 
 - Added optional `KINTARA_AUTH_MODE=single-user` (no login, one shared owner) and

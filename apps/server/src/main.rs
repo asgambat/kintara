@@ -19,6 +19,7 @@ async fn main() -> Result<()> {
 
     tracing::info!(
         library = %config.library_dir.display(),
+        extra_libraries = config.extra_library_dirs.len(),
         data = %config.data_dir.display(),
         web = %config.web_dir.display(),
         "starting kintara-server {}",

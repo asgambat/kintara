@@ -201,13 +201,14 @@ pub async fn delete(
     Path(id): Path<i64>,
 ) -> AppResult<StatusCode> {
     access::require_document_owner(&state, id, user_id).await?;
-    let row: Option<(String, Option<String>)> =
-        sqlx::query_as("SELECT relative_path, thumbnail_name FROM documents WHERE id = ?")
-            .bind(id)
-            .fetch_optional(&state.db)
-            .await?;
+    let row: Option<(i64, String, Option<String>)> = sqlx::query_as(
+        "SELECT root_id, relative_path, thumbnail_name FROM documents WHERE id = ?",
+    )
+    .bind(id)
+    .fetch_optional(&state.db)
+    .await?;
 
-    let (relative_path, thumbnail_name) = row.ok_or(AppError::NotFound)?;
+    let (root_id, relative_path, thumbnail_name) = row.ok_or(AppError::NotFound)?;
 
     // The row goes first. If the unlink fails the library is merely stale,
     // whereas deleting the file and failing to delete the row would leave a
@@ -217,9 +218,11 @@ pub async fn delete(
         .execute(&state.db)
         .await?;
 
-    if let Ok(path) = resolve_in_root(&state.config.library_dir, &relative_path) {
-        if let Err(err) = tokio::fs::remove_file(&path).await {
-            tracing::warn!(path = %path.display(), %err, "failed to remove document file");
+    if let Some(root) = state.config.root_dir(root_id) {
+        if let Ok(path) = resolve_in_root(root, &relative_path) {
+            if let Err(err) = tokio::fs::remove_file(&path).await {
+                tracing::warn!(path = %path.display(), %err, "failed to remove document file");
+            }
         }
     }
 

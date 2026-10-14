@@ -20,14 +20,19 @@ struct Located {
 
 async fn locate(state: &AppState, id: i64, user_id: i64) -> AppResult<Located> {
     access::require_document_view(state, id, user_id).await?;
-    let (relative_path, document_type): (String, String) =
-        sqlx::query_as("SELECT relative_path, document_type FROM documents WHERE id = ?")
-            .bind(id)
-            .fetch_optional(&state.db)
-            .await?
-            .ok_or(AppError::NotFound)?;
+    let (root_id, relative_path, document_type): (i64, String, String) = sqlx::query_as(
+        "SELECT root_id, relative_path, document_type FROM documents WHERE id = ?",
+    )
+    .bind(id)
+    .fetch_optional(&state.db)
+    .await?
+    .ok_or(AppError::NotFound)?;
 
-    let path = resolve_in_root(&state.config.library_dir, &relative_path)?;
+    let root = state
+        .config
+        .root_dir(root_id)
+        .ok_or(AppError::NotFound)?;
+    let path = resolve_in_root(root, &relative_path)?;
 
     Ok(Located {
         path,

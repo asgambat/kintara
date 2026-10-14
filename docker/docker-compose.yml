@@ -20,6 +20,10 @@ services:
       KINTARA_GITHUB_CLIENT_ID: replace-with-client-id
       KINTARA_GITHUB_CLIENT_SECRET: replace-with-client-secret
 
+      # The .env file beside this compose file holds secrets (OAuth client
+      # secret, KINTARA_SECRET). Keep it out of git and readable only by you:
+      # chmod 600 .env
+
       # Homelab alternative: disable login entirely (LAN + reverse proxy that
       # already authenticates). Uncomment to use without any OAuth app:
       # KINTARA_AUTH_MODE: single-user
@@ -41,6 +45,9 @@ services:
     volumes:
       # Your documents. Point this at the share you already drop PDFs into.
       - /volume1/documents:/library
+      # Optional second root (archive disk, another share). Pair with:
+      # KINTARA_EXTRA_LIBRARY_DIRS: /archive
+      # - /volume2/archive:/archive:ro
       # Database and generated thumbnails. Keep this on local disk — SQLite on
       # an SMB or NFS mount corrupts.
       - ./kintara-data:/data

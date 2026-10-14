@@ -22,6 +22,8 @@ jobs:
     permissions:
       contents: read
       packages: write
+      # Keyless cosign signing needs an OIDC identity.
+      id-token: write
 
     steps:
       - name: Checkout repository
@@ -53,6 +55,7 @@ jobs:
             type=raw,value=latest,enable={{is_default_branch}}
 
       - name: Build and push
+        id: build
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -65,3 +68,16 @@ jobs:
           # every run, for both architectures.
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Install cosign
+        if: github.event_name == 'push'
+        uses: sigstore/cosign-installer@v3
+
+      # Keyless (OIDC) signature over the published digest, so anyone pulling
+      # from GHCR can verify the image was built by this workflow.
+      # `cosign verify ghcr.io/<repo>@<digest> --certificate-identity-regexp '.*' --certificate-oidc-issuer https://token.actions.githubusercontent.com`
+      - name: Sign image
+        if: github.event_name == 'push'
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: cosign sign --yes "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${DIGEST}"
