@@ -79,10 +79,20 @@ jobs:
             type=image,
             name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }},
             push-by-digest=true,
-            name-canonical=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }},
+            name-canonical=true,
             push=true
-          cache-from: type=gha,scope=build-${{ env.PLATFORM_PAIR }}
-          cache-to: type=gha,mode=max,scope=build-${{ env.PLATFORM_PAIR }}
+          # Two cache backends: the per-architecture GHA scope is fast, but
+          # the shared GitHub Actions cache pool evicts entries aggressively
+          # (10 GB per repo), which is what turns a run into the expensive
+          # full dependency rebuild seen when the old build flipped back and
+          # forth. The registry cache tag lives in GHCR alongside the image
+          # and is never evicted, so a cold GHA cache still restores deps.
+          cache-from: |
+            type=gha,scope=build-${{ env.PLATFORM_PAIR }}
+            type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:buildcache-${{ env.PLATFORM_PAIR }}
+          cache-to: |
+            type=gha,mode=max,scope=build-${{ env.PLATFORM_PAIR }}
+            type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:buildcache-${{ env.PLATFORM_PAIR }},mode=max,ignore-error=true
 
       # workflow_dispatch builds for cache warm-up only, exactly as the old
       # single-job workflow (which never pushed on dispatch). Nothing is
@@ -95,8 +105,12 @@ jobs:
           file: docker/Dockerfile
           platforms: ${{ matrix.platform }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha,scope=build-${{ env.PLATFORM_PAIR }}
-          cache-to: type=gha,mode=max,scope=build-${{ env.PLATFORM_PAIR }}
+          cache-from: |
+            type=gha,scope=build-${{ env.PLATFORM_PAIR }}
+            type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:buildcache-${{ env.PLATFORM_PAIR }}
+          cache-to: |
+            type=gha,mode=max,scope=build-${{ env.PLATFORM_PAIR }}
+            type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:buildcache-${{ env.PLATFORM_PAIR }},mode=max,ignore-error=true
 
       - name: Export digest
         if: github.event_name == 'push'
