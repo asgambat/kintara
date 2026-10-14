@@ -7,7 +7,10 @@ WORKDIR /build
 COPY package.json package-lock.json ./
 COPY apps/web/package.json apps/web/package.json
 # npm ci needs the workspace manifests present before it can resolve the tree.
-RUN npm ci
+# The cache mount keeps the download cache across builds, so only changed
+# tarballs are fetched; --no-audit/--no-fund skip network calls that the
+# image never uses.
+RUN --mount=type=cache,target=/root/.npm npm ci --no-audit --no-fund
 
 COPY apps/web apps/web
 RUN npm run build --workspace apps/web
@@ -18,7 +21,11 @@ RUN npm run build --workspace apps/web
 # build below is cached until Cargo.toml actually changes rather than being
 # redone every time a source file is touched.
 FROM rust:1.96-bookworm AS chef
-RUN cargo install cargo-chef --locked
+# Registry/git cache mounts survive layer invalidation: even when Cargo.toml
+# changes, only the delta is downloaded instead of the whole registry index.
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    cargo install cargo-chef --locked
 WORKDIR /build
 
 FROM chef AS planner
@@ -29,10 +36,14 @@ RUN cargo chef prepare --recipe-path recipe.json
 # --------------------------------------------------------------- rust build
 FROM chef AS server
 COPY --from=planner /build/recipe.json recipe.json
-RUN cargo chef cook --release --recipe-path recipe.json
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    cargo chef cook --release --recipe-path recipe.json
 
 COPY apps/server .
-RUN cargo build --release --locked && strip target/release/kintara-server
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    cargo build --release --locked && strip target/release/kintara-server
 
 
 # ----------------------------------------------------------------- runtime
@@ -48,7 +59,7 @@ RUN apt-get update \
         ca-certificates \
         gosu \
         curl \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* /usr/share/doc/* /usr/share/man/*
 
 # A fixed default that the entrypoint remaps to PUID/PGID at start-up. NAS
 # shares almost never line up with a hardcoded uid.
