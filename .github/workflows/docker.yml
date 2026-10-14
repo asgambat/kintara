@@ -16,6 +16,18 @@ env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
 
+# Keyless cosign signing needs `id-token: write`: with it, cosign picks up
+# the ambient workflow OIDC token and signs without ever asking for browser
+# interaction. Without it, the runner has no identity token to offer, so
+# cosign degrades to the interactive device-flow prompt ("Non-interactive
+# mode detected" → paste a human code), which a headless runner cannot
+# complete. `packages: write` authorizes the default token's registry pushes
+# whenever no PAT secret is set.
+permissions:
+  contents: read
+  packages: write
+  id-token: write
+
 # Each architecture is built on its own runner by the `build` matrix job,
 # pushed a single-platform manifest by digest, and the `merge` job assembles
 # them into the final multi-platform manifest list. This replaces the previous
