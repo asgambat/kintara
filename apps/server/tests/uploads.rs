@@ -202,7 +202,7 @@ async fn an_upload_larger_than_axums_default_body_limit_succeeds() {
     // axum's DefaultBodyLimit is 2 MB. Real documents — magazines especially —
     // are far bigger, so anything under the configured ceiling must go through.
     let mut big = sample_pdf();
-    big.extend(std::iter::repeat(b'%').take(5 * 1024 * 1024));
+    big.extend(std::iter::repeat_n(b'%', 5 * 1024 * 1024));
 
     let response = app.upload("magazine.pdf", &big, &[]).await;
     assert_eq!(

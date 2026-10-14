@@ -25,7 +25,7 @@ async fn resolve_user_id(parts: &Parts, state: &AppState) -> Result<i64, AppErro
         AuthMode::SingleUser => auth::ensure_no_auth_owner(state).await,
         AuthMode::ProxyHeader => {
             let header_name = state.config.proxy_user_header.as_deref().ok_or_else(|| {
-                AppError::Internal(anyhow::anyhow!("proxy user header not configured").into())
+                AppError::Internal(anyhow::anyhow!("proxy user header not configured"))
             })?;
             let raw = parts
                 .headers

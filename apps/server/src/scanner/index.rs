@@ -198,9 +198,10 @@ pub async fn index_file(state: &AppState, path: &Path) -> AppResult<Outcome> {
         return Ok(Outcome::Skipped);
     }
 
-    Ok(Outcome::Added(
-        add(state, root_id, path, &relative_path, &hash, size).await?,
-    ))
+    match add(state, root_id, path, &relative_path, &hash, size).await? {
+        Some(id) => Ok(Outcome::Added(id)),
+        None => Ok(Outcome::Skipped),
+    }
 }
 
 async fn add(
@@ -210,7 +211,7 @@ async fn add(
     relative_path: &str,
     hash: &str,
     size: i64,
-) -> AppResult<i64> {
+) -> AppResult<Option<i64>> {
     let owner_id = crate::access::installation_owner_id(state).await?;
     let extension = extension_of(path);
     let metadata = if extension == "pdf" {
@@ -230,11 +231,20 @@ async fn add(
         .filter(|t| !t.trim().is_empty())
         .unwrap_or_else(|| media::title_from_filename(filename));
 
-    let id: i64 = sqlx::query_scalar(
+    // The NOT EXISTS is the race guard for concurrent scans: two tasks can
+    // index two copies of the same content between `index_file`'s duplicate
+    // check and here, and a plain INSERT from both would produce two rows for
+    // one document. SQLite serializes write statements, and this check plus
+    // insert are one statement, so only the first task inserts.
+    let added: Option<i64> = sqlx::query_scalar(
         "INSERT INTO documents
             (owner_id, root_id, title, author, relative_path, document_type, file_hash, file_size,
              keywords, page_count, year, indexed_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+         SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now')
+         WHERE NOT EXISTS (
+             SELECT 1 FROM documents
+             WHERE file_hash = ? AND NOT (root_id = ? AND relative_path = ?)
+         )
          RETURNING id",
     )
     .bind(owner_id)
@@ -248,11 +258,20 @@ async fn add(
     .bind(&metadata.keywords)
     .bind(metadata.page_count)
     .bind(metadata.year)
-    .fetch_one(&state.db)
+    .bind(hash)
+    .bind(root_id)
+    .bind(relative_path)
+    .fetch_optional(&state.db)
     .await?;
 
-    if extension == "pdf" {
-        if let Some(name) = media::generate_thumbnail(path, &state.config.thumbnail_dir(), id).await
+    // Someone else inserted this content while we were extracting metadata.
+    let Some(id) = added else {
+        tracing::info!(path = %relative_path, "skipping duplicate content already indexed");
+        return Ok(None);
+    };
+
+    if extension == "pdf"
+        && let Some(name) = media::generate_thumbnail(path, &state.config.thumbnail_dir(), id).await
         {
             sqlx::query("UPDATE documents SET thumbnail_name = ? WHERE id = ?")
                 .bind(&name)
@@ -260,12 +279,11 @@ async fn add(
                 .execute(&state.db)
                 .await?;
         }
-    }
 
     text_extraction::extract_and_store(state, id, path, &extension).await?;
 
     tracing::info!(id, path = %relative_path, "indexed new document");
-    Ok(id)
+    Ok(Some(id))
 }
 
 /// Refreshes a document whose bytes changed, leaving user-edited metadata alone.
@@ -300,13 +318,12 @@ async fn refresh(state: &AppState, id: i64, path: &Path, hash: &str, size: i64) 
                 .execute(&state.db)
                 .await?;
 
-            if let Some(old) = previous {
-                if let Ok(old_path) =
+            if let Some(old) = previous
+                && let Ok(old_path) =
                     crate::files::resolve_in_root(&state.config.thumbnail_dir(), &old)
                 {
                     let _ = tokio::fs::remove_file(old_path).await;
                 }
-            }
         }
     }
 
@@ -335,11 +352,10 @@ pub async fn forget_path(state: &AppState, root_id: i64, relative_path: &str) ->
         .execute(&state.db)
         .await?;
 
-    if let Some(name) = thumbnail {
-        if let Ok(path) = crate::files::resolve_in_root(&state.config.thumbnail_dir(), &name) {
+    if let Some(name) = thumbnail
+        && let Ok(path) = crate::files::resolve_in_root(&state.config.thumbnail_dir(), &name) {
             let _ = tokio::fs::remove_file(path).await;
         }
-    }
 
     tracing::info!(id, path = %relative_path, "document removed from library");
     Ok(true)

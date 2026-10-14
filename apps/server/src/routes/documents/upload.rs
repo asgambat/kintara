@@ -42,15 +42,14 @@ pub async fn discard_stale_uploads(library_dir: &StdPath) {
         match entries.next_entry().await {
             Ok(Some(entry)) => {
                 let name = entry.file_name();
-                if name.to_string_lossy().starts_with(".upload-") {
-                    if let Err(err) = tokio::fs::remove_file(entry.path()).await {
+                if name.to_string_lossy().starts_with(".upload-")
+                    && let Err(err) = tokio::fs::remove_file(entry.path()).await {
                         tracing::warn!(
                             path = %entry.path().display(),
                             %err,
                             "could not remove stale upload temp file"
                         );
                     }
-                }
             }
             Ok(None) => break,
             Err(err) => {
@@ -270,7 +269,7 @@ async fn store_new_document(
     collection_id: Option<i64>,
 ) -> AppResult<(StatusCode, Json<Document>)> {
     let metadata = if upload.extension == "pdf" {
-        media::extract_pdf_metadata(&destination).await
+        media::extract_pdf_metadata(destination).await
     } else {
         media::Metadata::default()
     };
@@ -308,9 +307,9 @@ async fn store_new_document(
     add_placement(&mut tx, id, library_id, collection_id).await?;
     tx.commit().await?;
 
-    if upload.extension == "pdf" {
-        if let Some(name) =
-            media::generate_thumbnail(&destination, &state.config.thumbnail_dir(), id).await
+    if upload.extension == "pdf"
+        && let Some(name) =
+            media::generate_thumbnail(destination, &state.config.thumbnail_dir(), id).await
         {
             sqlx::query("UPDATE documents SET thumbnail_name = ? WHERE id = ?")
                 .bind(&name)
@@ -318,9 +317,8 @@ async fn store_new_document(
                 .execute(&state.db)
                 .await?;
         }
-    }
 
-    text_extraction::extract_and_store(state, id, &destination, &upload.extension).await?;
+    text_extraction::extract_and_store(state, id, destination, &upload.extension).await?;
 
     let document = super::fetch_one(state, id, user_id).await?;
     Ok((StatusCode::CREATED, Json(document)))
@@ -422,11 +420,10 @@ pub async fn upload_cover(
         .execute(&state.db)
         .await?;
 
-    if let Some(old) = previous {
-        if let Ok(path) = crate::files::resolve_in_root(&state.config.thumbnail_dir(), &old) {
+    if let Some(old) = previous
+        && let Ok(path) = crate::files::resolve_in_root(&state.config.thumbnail_dir(), &old) {
             let _ = tokio::fs::remove_file(&path).await;
         }
-    }
 
     Ok(StatusCode::NO_CONTENT)
 }

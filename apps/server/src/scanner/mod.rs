@@ -106,11 +106,10 @@ pub async fn full_scan(state: &AppState) -> AppResult<()> {
         if !configured.contains(&root_id) {
             continue;
         }
-        if !seen.contains(&(root_id, relative.clone())) {
-            if index::forget_path(state, root_id, &relative).await? {
+        if !seen.contains(&(root_id, relative.clone()))
+            && index::forget_path(state, root_id, &relative).await? {
                 removed += 1;
             }
-        }
     }
 
     tracing::info!(
@@ -199,11 +198,10 @@ pub fn spawn_watcher(state: AppState) {
                     if let Err(err) = index::index_file(&state, &path).await {
                         tracing::warn!(path = %path.display(), ?err, "failed to index");
                     }
-                } else if let Some((root_id, relative)) = located {
-                    if let Err(err) = index::forget_path(&state, root_id, &relative).await {
+                } else if let Some((root_id, relative)) = located
+                    && let Err(err) = index::forget_path(&state, root_id, &relative).await {
                         tracing::warn!(%relative, ?err, "failed to remove");
                     }
-                }
             }
         }
 

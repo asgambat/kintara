@@ -101,7 +101,7 @@ pub fn normalize_proxy_username(raw: &str) -> Option<String> {
 /// switches and renames. Never creates a second owner row.
 pub async fn ensure_no_auth_owner(state: &AppState) -> AppResult<i64> {
     let wanted = normalize_proxy_username(&state.config.local_user).ok_or_else(|| {
-        crate::error::AppError::Internal(anyhow::anyhow!("invalid KINTARA_LOCAL_USER").into())
+        crate::error::AppError::Internal(anyhow::anyhow!("invalid KINTARA_LOCAL_USER"))
     })?;
     let row: Option<(i64, String, i64)> =
         sqlx::query_as("SELECT id, username, is_admin FROM users ORDER BY id LIMIT 1")

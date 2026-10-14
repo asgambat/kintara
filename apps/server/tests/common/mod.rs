@@ -403,8 +403,8 @@ pub fn sample_pdf() -> Vec<u8> {
     let xref = out.len();
     out.extend_from_slice(format!("xref\n0 {}\n", objects.len() + 1).as_bytes());
     out.extend_from_slice(b"0000000000 65535 f \n");
-    for num in 1..=objects.len() {
-        out.extend_from_slice(format!("{:010} 00000 n \n", offsets[num]).as_bytes());
+    for offset in offsets.iter().skip(1) {
+        out.extend_from_slice(format!("{:010} 00000 n \n", offset).as_bytes());
     }
     out.extend_from_slice(
         format!(

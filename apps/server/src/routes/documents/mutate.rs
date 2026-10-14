@@ -42,11 +42,10 @@ pub async fn update(
     Json(body): Json<UpdateDocument>,
 ) -> AppResult<StatusCode> {
     access::require_document_editor(&state, id, user_id).await?;
-    if let Some(title) = &body.title {
-        if title.trim().is_empty() {
+    if let Some(title) = &body.title
+        && title.trim().is_empty() {
             return Err(AppError::BadRequest("title cannot be empty".into()));
         }
-    }
     if let Some(Some(year)) = body.year {
         let current_year = chrono::Utc::now().year() as i64;
         if !(1000..=current_year).contains(&year) {
@@ -218,19 +217,16 @@ pub async fn delete(
         .execute(&state.db)
         .await?;
 
-    if let Some(root) = state.config.root_dir(root_id) {
-        if let Ok(path) = resolve_in_root(root, &relative_path) {
-            if let Err(err) = tokio::fs::remove_file(&path).await {
+    if let Some(root) = state.config.root_dir(root_id)
+        && let Ok(path) = resolve_in_root(root, &relative_path)
+            && let Err(err) = tokio::fs::remove_file(&path).await {
                 tracing::warn!(path = %path.display(), %err, "failed to remove document file");
             }
-        }
-    }
 
-    if let Some(name) = thumbnail_name {
-        if let Ok(path) = resolve_in_root(&state.config.thumbnail_dir(), &name) {
+    if let Some(name) = thumbnail_name
+        && let Ok(path) = resolve_in_root(&state.config.thumbnail_dir(), &name) {
             let _ = tokio::fs::remove_file(&path).await;
         }
-    }
 
     Ok(StatusCode::NO_CONTENT)
 }

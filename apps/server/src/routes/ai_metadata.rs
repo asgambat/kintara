@@ -302,7 +302,7 @@ fn valid_isbn(value: &str) -> bool {
                     (10 - index as u32) * digit
                 })
                 .sum();
-            sum % 11 == 0
+            sum.is_multiple_of(11)
         }
         13 => {
             if !value.chars().all(|character| character.is_ascii_digit()) {
