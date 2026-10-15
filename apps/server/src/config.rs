@@ -76,6 +76,13 @@ pub struct Config {
     /// Largest upload accepted, in bytes. Scanned books run to hundreds of
     /// megabytes, and axum's 2 MB default rejects almost any real PDF.
     pub max_upload_bytes: usize,
+    /// Ceiling for every poppler subprocess (`pdftotext`, `pdfinfo`,
+    /// `pdftoppm`). A corrupt or malicious PDF makes poppler hang forever,
+    /// which would freeze the scan and any request it is serving; past this
+    /// timeout the process is killed and the document degrades the same way
+    /// as any other poppler failure. Zero and negative values fall back to
+    /// the default.
+    pub poppler_timeout: std::time::Duration,
     /// OAuth credentials stay on the server; the frontend receives only a
     /// relative URL that begins the authorization flow.
     pub github_oauth: Option<GitHubOAuthConfig>,
@@ -88,6 +95,10 @@ pub struct Config {
     pub proxy_user_header: Option<String>,
     /// Usernames (lowercased) that are always admin in `proxy-header` mode.
     pub proxy_admin_users: Vec<String>,
+    /// Hours between scheduled database snapshots in `<data_dir>/backups`.
+    /// 0 disables the scheduler; the pre-migration backup still runs. Zero
+    /// and invalid values mean "disabled".
+    pub backup_interval_hours: u64,
 }
 
 impl Config {
@@ -130,6 +141,11 @@ impl Config {
                 .and_then(|v| v.trim().parse::<usize>().ok())
                 .unwrap_or(1024)
                 .saturating_mul(1024 * 1024),
+            poppler_timeout: poppler_timeout_from_env(),
+            backup_interval_hours: std::env::var("KINTARA_BACKUP_INTERVAL_HOURS")
+                .ok()
+                .and_then(|v| v.trim().parse::<u64>().ok())
+                .unwrap_or(0),
             github_oauth,
             auth_mode,
             local_user,
@@ -302,6 +318,18 @@ fn scan_jobs_from_env() -> usize {
         .and_then(|v| v.trim().parse::<usize>().ok())
         .filter(|&n| n >= 1)
         .unwrap_or(default)
+}
+
+// Seconds for the poppler kill timer. Zero and invalid values fall back to
+/// the default rather than meaning "never time out" — an easy way to
+/// re-enable the very hang this variable exists to prevent.
+fn poppler_timeout_from_env() -> std::time::Duration {
+    let secs = std::env::var("KINTARA_POPPLER_TIMEOUT_S")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .filter(|&s| s >= 1)
+        .unwrap_or(60);
+    std::time::Duration::from_secs(secs)
 }
 
 /// Accepts the spellings people actually type in a compose file.

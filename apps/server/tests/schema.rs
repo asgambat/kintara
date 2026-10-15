@@ -6,6 +6,7 @@
 //! prove nothing.
 
 use kintara_server::db;
+use sqlx::Row;
 use sqlx::SqlitePool;
 
 async fn fresh_db() -> (tempfile::TempDir, SqlitePool) {
@@ -286,6 +287,119 @@ async fn annotation_type_is_constrained() {
         result.is_err(),
         "annotation_type outside ('highlight','note') must be rejected"
     );
+}
+
+/// The shared-library access filter probes `library_documents` from the
+/// document side once per candidate row (the reverse of the primary key), so
+/// the migration must add the covering indexes and the planner must actually
+/// reach for them, or a large library pays a scan per filtered listing page.
+#[tokio::test]
+async fn access_filters_resolve_through_reverse_indexes() {
+    let (_dir, pool) = fresh_db().await;
+    seed(&pool).await;
+
+    let indexes: Vec<String> = sqlx::query_scalar(
+        "SELECT name FROM sqlite_master WHERE type = 'index' AND name IN
+         ('idx_library_documents_document', 'idx_document_tags_tag')",
+    )
+    .fetch_all(&pool)
+    .await
+    .expect("read indexes");
+
+    assert_eq!(
+        indexes.len(),
+        2,
+        "both reverse indexes must be created, got {indexes:?}"
+    );
+
+    // Mirrors the shape `push_filters` builds, with the per-row access probe.
+    let plans: Vec<String> = sqlx::query(
+        "EXPLAIN QUERY PLAN SELECT d.id FROM documents d WHERE (d.owner_id = 1 OR EXISTS (
+            SELECT 1 FROM library_documents access_ld
+            WHERE access_ld.document_id = d.id))
+             AND d.id IN (SELECT document_id FROM document_tags WHERE tag_id = 1)",
+    )
+    .fetch_all(&pool)
+    .await
+    .expect("explain")
+    .iter()
+    .map(|row| row.get::<String, _>("detail"))
+    .collect();
+
+    assert!(
+        plans
+            .iter()
+            .any(|detail| detail.contains("idx_library_documents_document")),
+        "the access probe must use the reverse index, plan: {plans:?}"
+    );
+    assert!(
+        plans.iter().any(|detail| detail.contains("idx_document_tags_tag")),
+        "the tag filter must use the reverse index, plan: {plans:?}"
+    );
+}
+
+/// auto_vacuum became incremental for fresh databases, so long installs
+/// reclaim pages without ever requiring a blocking full VACUUM.
+#[tokio::test]
+async fn a_fresh_database_uses_incremental_auto_vacuum() {
+    let (_dir, pool) = fresh_db().await;
+    let mode: i64 = sqlx::query_scalar("PRAGMA auto_vacuum")
+        .fetch_one(&pool)
+        .await
+        .expect("auto_vacuum");
+    assert_eq!(mode, 2, "2 is SQLite's incremental auto_vacuum");
+}
+
+/// Scheduled snapshots: `VACUUM INTO` writes a standalone file every time and
+/// the rotation keeps only the newest five, wherever they came from.
+#[tokio::test]
+async fn snapshots_are_written_and_rotated() {
+    use std::time::Duration;
+
+    // Mirrors db::BACKUP_KEEP, which is private for a reason.
+    const BACKUP_KEEP_TEST: usize = 5;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("kintara.db");
+    let pool = db::connect(&db_path).await.expect("migrations");
+
+    for _ in 0..(BACKUP_KEEP_TEST + 1) {
+        db::backup(&pool, &db_path).await.expect("snapshot");
+        // Snapshot names carry millisecond stamps, but the breather keeps the
+        // ordering deterministic even on fast disks.
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+
+    let backups = dir.path().join("backups");
+    let kept: Vec<String> = std::fs::read_dir(&backups)
+        .expect("list backups")
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(
+        kept.len(),
+        BACKUP_KEEP_TEST,
+        "rotation keeps only the newest snapshots, got {kept:?}"
+    );
+
+    // The snapshot file is a complete, standalone SQLite database — restore
+    // is a file swap, so it must open even without the original around.
+    let newest = std::fs::read_dir(&backups)
+        .expect("list backups")
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .next()
+        .expect("snapshot exists");
+    let snapshot: sqlx::SqlitePool = sqlx::pool::PoolOptions::new()
+        .connect(&format!("sqlite://{}", newest.display()))
+        .await
+        .expect("snapshot opens as a database");
+    let tables: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table'")
+            .fetch_one(&snapshot)
+            .await
+            .expect("read tables");
+    assert!(tables > 0, "snapshot carries the schema");
 }
 
 #[tokio::test]

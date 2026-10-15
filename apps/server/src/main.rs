@@ -37,6 +37,25 @@ async fn main() -> Result<()> {
 
     auth::purge_expired_sessions(&state).await?;
 
+    if state.config.backup_interval_hours > 0 {
+        let interval_hours = state.config.backup_interval_hours;
+        let snapshot_state = state.clone();
+        tokio::spawn(async move {
+            // First snapshot right away, then one per interval. A failed
+            // snapshot is logged and never stops the server or the loop: the
+            // newest previous snapshot is still there.
+            let db_path = snapshot_state.config.database_path();
+            loop {
+                use kintara_server::db;
+                if let Err(err) = db::backup(&snapshot_state.db, &db_path).await {
+                    tracing::warn!(?err, "scheduled database snapshot failed");
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(interval_hours * 3600)).await;
+            }
+        });
+        tracing::info!(interval_hours, "scheduled database snapshots enabled");
+    }
+
     if scan_on_start {
         // The sweep runs in the background so the server answers requests
         // (and health checks) immediately, even with a huge library. A failed

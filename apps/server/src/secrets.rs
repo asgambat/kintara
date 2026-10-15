@@ -126,6 +126,8 @@ mod tests {
             watch: false,
             scan_jobs: 1,
             max_upload_bytes: 1024,
+            poppler_timeout: std::time::Duration::from_secs(60),
+            backup_interval_hours: 0,
             github_oauth: None,
             auth_mode: crate::config::AuthMode::Oauth,
             local_user: "local".to_string(),

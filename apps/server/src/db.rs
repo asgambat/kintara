@@ -14,14 +14,32 @@ use sqlx::SqlitePool;
 /// busy timeout covers the brief windows where it is not.
 pub async fn connect(database_path: &Path) -> Result<SqlitePool> {
     let url = format!("sqlite://{}", database_path.display());
+    // auto_vacuum lives in the database header, and the set only sticks when
+    // done before any table exists, so the fresh-database check happens
+    // before opening the file.
+    let fresh = !database_path.exists();
 
-    let options = SqliteConnectOptions::from_str(&url)
+    let mut options = SqliteConnectOptions::from_str(&url)
         .with_context(|| format!("invalid database path {}", database_path.display()))?
         .create_if_missing(true)
         .journal_mode(SqliteJournalMode::Wal)
         .synchronous(SqliteSynchronous::Normal)
         .foreign_keys(true)
         .busy_timeout(Duration::from_secs(10));
+
+    // Fresh installs reclaim freed pages incrementally forever after, without
+    // ever paying for a full rewrite. Existing databases are untouched on
+    // purpose: switching them requires a whole-file VACUUM, which can block
+    // for minutes on large libraries (see the README for the manual one-off
+    // step). The set is a cheap per-connection no-op once tables exist, so
+    // attaching it to the connect options (applied on *every* pool
+    // connection) is what makes the flag survive into the header: the first
+    // writer — from whichever pooled connection — carries it. Executing the
+    // pragma on one pooled connection alone does not, because the schema is
+    // then created by other connections whose state is still the default.
+    if fresh {
+        options = options.pragma("auto_vacuum", "2");
+    }
 
     let pool = SqlitePoolOptions::new()
         .max_connections(8)
@@ -32,7 +50,7 @@ pub async fn connect(database_path: &Path) -> Result<SqlitePool> {
 
     let migrator = sqlx::migrate!("./migrations");
     if has_pending(&pool, &migrator).await? {
-        backup_before_migrate(database_path).await?;
+        backup(&pool, database_path).await?;
     }
     migrator
         .run(&pool)
@@ -66,19 +84,18 @@ async fn has_pending(pool: &SqlitePool, migrator: &sqlx::migrate::Migrator) -> R
         .any(|m| !applied.contains(&m.version)))
 }
 
-/// Copies the database file aside before migrations run, so a failed or
-/// surprising migration can be undone by stopping the server and swapping the
-/// backup back. Keeps the newest [`BACKUP_KEEP`] copies and prunes the rest.
-async fn backup_before_migrate(database_path: &Path) -> Result<()> {
-    let meta = tokio::fs::metadata(database_path)
-        .await
-        .with_context(|| format!("cannot stat {}", database_path.display()))?;
-    if !meta.is_file() || meta.len() == 0 {
-        return Ok(());
-    }
-
+/// Copy of the database file into `<data_dir>/backups`. Used by the pre-migration
+/// guard and by the scheduled snapshot loop (`KINTARA_BACKUP_INTERVAL_HOURS`).
+///
+/// SQLite's online `VACUUM INTO` reads the source through one implicit read
+/// transaction (WAL contents included), so readers and writers are never
+/// blocked and the output stands alone. A bare file copy would miss any
+/// transaction still living in the WAL and would also drag the WAL/SHM
+/// sidecars along. Millisecond timestamp: two snapshots can legally land in
+/// the same second.
+pub async fn backup(pool: &SqlitePool, database_path: &Path) -> Result<()> {
     let Some(data_dir) = database_path.parent() else {
-        return Ok(());
+        anyhow::bail!("database path {} has no parent directory", database_path.display());
     };
     let backups = data_dir.join("backups");
     tokio::fs::create_dir_all(&backups)
@@ -89,12 +106,28 @@ async fn backup_before_migrate(database_path: &Path) -> Result<()> {
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or("kintara");
-    let stamp = chrono::Utc::now().format("%Y%m%d-%H%M%S");
+    let stamp = chrono::Utc::now().format("%Y%m%d-%H%M%S%.3f");
     let dest = backups.join(format!("{stem}-{stamp}.db"));
-    tokio::fs::copy(database_path, &dest)
+    sqlx::query("VACUUM INTO ?")
+        .bind(dest.to_string_lossy().to_string())
+        .execute(pool)
         .await
         .with_context(|| format!("cannot back up to {}", dest.display()))?;
-    tracing::info!(backup = %dest.display(), "database backed up before migrations");
+    tracing::info!(backup = %dest.display(), "database snapshot created");
+
+    prune_backups(database_path).await
+}
+
+/// Keeps the newest [`BACKUP_KEEP`] snapshots and prunes the older ones.
+async fn prune_backups(database_path: &Path) -> Result<()> {
+    let stem = database_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("kintara");
+    let Some(data_dir) = database_path.parent() else {
+        return Ok(());
+    };
+    let backups = data_dir.join("backups");
 
     let mut kept: Vec<std::path::PathBuf> = Vec::new();
     let mut entries = tokio::fs::read_dir(&backups)

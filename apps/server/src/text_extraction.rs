@@ -5,6 +5,7 @@
 
 use std::path::Path;
 use std::process::Stdio;
+use std::time::Duration;
 
 use tokio::process::Command;
 
@@ -51,9 +52,9 @@ impl ExtractedText {
     }
 }
 
-pub async fn extract(path: &Path, document_type: &str) -> ExtractedText {
+pub async fn extract(path: &Path, document_type: &str, poppler_timeout: Duration) -> ExtractedText {
     match document_type {
-        "pdf" => extract_pdf_with(path, Path::new("pdftotext")).await,
+        "pdf" => extract_pdf_with(path, Path::new("pdftotext"), poppler_timeout).await,
         "md" | "txt" => match tokio::fs::read(path).await {
             Ok(bytes) => from_pages(vec![String::from_utf8_lossy(&bytes).into_owned()]),
             Err(err) => {
@@ -65,15 +66,33 @@ pub async fn extract(path: &Path, document_type: &str) -> ExtractedText {
     }
 }
 
-async fn extract_pdf_with(path: &Path, program: &Path) -> ExtractedText {
-    let output = Command::new(program)
-        .arg("-enc")
-        .arg("UTF-8")
-        .arg(path)
-        .arg("-")
-        .stdin(Stdio::null())
-        .output()
-        .await;
+async fn extract_pdf_with(path: &Path, program: &Path, poppler_timeout: Duration) -> ExtractedText {
+    // Both layers of failure handling matter: `kill_on_drop` stops a hung
+    // process when the future is dropped (including on the timeout below and
+    // on task cancellation), and `timeout` decides when that drop happens.
+    // Without either, a corrupt PDF freezes the scan and every request
+    // sharing its task, forever.
+    let output = tokio::time::timeout(
+        poppler_timeout,
+        Command::new(program)
+            .kill_on_drop(true)
+            .arg("-enc")
+            .arg("UTF-8")
+            .arg(path)
+            .arg("-")
+            .stdin(Stdio::null())
+            .output(),
+    )
+    .await;
+
+    let Ok(output) = output else {
+        tracing::warn!(
+            path = %path.display(),
+            timeout_secs = poppler_timeout.as_secs(),
+            "pdftotext exceeded its timeout and was killed"
+        );
+        return ExtractedText::failed();
+    };
 
     let Ok(output) = output else {
         tracing::debug!(program = %program.display(), "pdftotext unavailable");
@@ -144,7 +163,7 @@ pub async fn extract_and_store(
     path: &Path,
     document_type: &str,
 ) -> AppResult<TextStatus> {
-    let extracted = extract(path, document_type).await;
+    let extracted = extract(path, document_type, state.config.poppler_timeout).await;
     let combined = extracted.combined();
     let mut tx = state.db.begin().await?;
 
@@ -216,7 +235,34 @@ mod tests {
     #[tokio::test]
     async fn a_missing_pdftotext_binary_degrades_to_failed() {
         let missing = PathBuf::from("/definitely/missing/kintara-pdftotext");
-        let text = extract_pdf_with(Path::new("paper.pdf"), &missing).await;
+        let text = extract_pdf_with(Path::new("paper.pdf"), &missing, Duration::from_secs(60)).await;
         assert_eq!(text.status, TextStatus::Failed);
+    }
+
+    /// A poppler process that hangs (a corrupt PDF wedging poppler) must not
+    /// block its caller: at half-way through the sleep the extraction gives up
+    /// with `failed`, and the child is gone because `kill_on_drop(true)` is set
+    /// — the return being what proves no zombie is left blocking the scan.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_hanging_poppler_degrades_to_failed_within_the_timeout() {
+        let script = std::env::temp_dir().join(format!("kintara-hang-{}", std::process::id()));
+        std::fs::write(&script, "#!/bin/sh\nsleep 60\n").expect("write hanging script");
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
+                .expect("make script executable");
+        }
+
+        let started = std::time::Instant::now();
+        let text = extract_pdf_with(Path::new("paper.pdf"), &script, Duration::from_millis(400)).await;
+        let elapsed = started.elapsed();
+
+        let _ = tokio::fs::remove_file(&script).await;
+
+        assert_eq!(text.status, TextStatus::Failed);
+        // Gone after the timeout plus slack for the kill to land, so a far
+        // longer wait would mean the hang was never interrupted.
+        assert!(elapsed < std::time::Duration::from_secs(30), "took {elapsed:?}");
     }
 }

@@ -213,6 +213,8 @@ to the account that uploaded them.
 | `KINTARA_PROXY_USER_HEADER` | none | Trusted username header for `proxy-header` mode, e.g. `X-Forwarded-User` |
 | `KINTARA_PROXY_ADMIN_USERS` | none | Comma-separated usernames always admin in `proxy-header` mode |
 | `KINTARA_EXTRA_LIBRARY_DIRS` | none | Colon-separated extra library roots scanned alongside `/library` |
+| `KINTARA_POPPLER_TIMEOUT_S` | `60` | Kill timer for `pdftotext`, `pdfinfo`, and `pdftoppm`; a wedged PDF then degrades to a failed extraction instead of blocking the scan |
+| `KINTARA_BACKUP_INTERVAL_HOURS` | `0` (off) | Hours between automatic database snapshots in `/data/backups`; the newest 5 are kept |
 | `KINTARA_SECRET` | generated file | Optional provider-key encryption source of 32 or more characters |
 
 GitHub login stays disabled unless all three OAuth variables are set. Kintara stops during
@@ -232,6 +234,24 @@ with the database. Saved OpenAI and Google keys cannot be decrypted without it.
 Some network shares do not report filesystem events. Set `KINTARA_WATCH: "false"` if the
 watcher cannot follow your share. Keep `KINTARA_SCAN_ON_START` enabled so each restart
 finds changes.
+
+### Database maintenance
+
+Snapshots land in `/data/backups` before every migration and, with `KINTARA_BACKUP_INTERVAL_HOURS`
+set (for example `24`), on a schedule as well; at most the newest 5 are kept. To restore a
+snapshot: stop the container, replace `/data/kintara.db` with the snapshot file, start again.
+
+New databases use incremental auto-vacuum, so the database file reclaims freed pages on its own.
+Existing databases keep their setting: to switch one, stop Kintara (or stop your server process)
+and run against a copy of the database:
+
+```sql
+PRAGMA auto_vacuum = 2;
+VACUUM;
+```
+
+A full `VACUUM` rewrites the file and can take minutes on large libraries, which is why Kintara
+never runs one automatically.
 
 ## Multiple library roots
 

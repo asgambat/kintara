@@ -42,6 +42,10 @@ services:
       # (some SMB and NFS mounts do not). The startup scan still picks changes up.
       # KINTARA_WATCH: "false"
 
+      # Optional: scheduled database snapshots into /data/backups (hours; 0 =
+      # off). The newest 5 are kept. Restore = stop, swap kintara.db, start.
+      # KINTARA_BACKUP_INTERVAL_HOURS: 24
+
     volumes:
       # Your documents. Point this at the share you already drop PDFs into.
       - /volume1/documents:/library

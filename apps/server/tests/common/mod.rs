@@ -42,6 +42,10 @@ impl TestApp {
             watch: false,
             scan_jobs: 2,
             max_upload_bytes: 64 * 1024 * 1024,
+            // Generous: poppler in tests works on tiny fixtures. The timeout
+            // tests drive their own short timer directly.
+            poppler_timeout: std::time::Duration::from_secs(60),
+            backup_interval_hours: 0,
             extra_library_dirs: Vec::new(),
             github_oauth: None,
             auth_mode: kintara_server::config::AuthMode::Oauth,

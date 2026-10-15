@@ -11,6 +11,7 @@
 
 use std::path::Path;
 use std::process::Stdio;
+use std::time::Duration;
 
 use tokio::process::Command;
 
@@ -34,12 +35,21 @@ pub fn hash_bytes(bytes: &[u8]) -> String {
 /// A failure here is never fatal — a PDF with no metadata, or a missing
 /// poppler, should still produce a usable library entry with a filename-derived
 /// title. Callers get an empty Metadata rather than an error.
-pub async fn extract_pdf_metadata(path: &Path) -> Metadata {
-    let output = Command::new("pdfinfo")
-        .arg(path)
-        .stdin(Stdio::null())
-        .output()
-        .await;
+pub async fn extract_pdf_metadata(path: &Path, poppler_timeout: Duration) -> Metadata {
+    let output = tokio::time::timeout(
+        poppler_timeout,
+        Command::new("pdfinfo")
+            .kill_on_drop(true)
+            .arg(path)
+            .stdin(Stdio::null())
+            .output(),
+    )
+    .await;
+
+    let Ok(output) = output else {
+        tracing::warn!(path = %path.display(), "pdfinfo exceeded its timeout and was killed");
+        return Metadata::default();
+    };
 
     let Ok(output) = output else {
         tracing::debug!("pdfinfo unavailable; skipping metadata extraction");
@@ -101,29 +111,53 @@ pub async fn generate_thumbnail(
     source: &Path,
     thumbnail_dir: &Path,
     document_id: i64,
+    poppler_timeout: Duration,
 ) -> Option<String> {
     // The id in the name means a regenerated thumbnail lands on a new URL, so
     // the aggressive cache header on the thumbnail route stays correct.
     let stem = format!("doc-{document_id}-{}", chrono::Utc::now().timestamp());
     let prefix = thumbnail_dir.join(&stem);
+    let filename = format!("{stem}.jpg");
 
-    let status = Command::new("pdftoppm")
-        .args(["-jpeg", "-r", "72", "-f", "1", "-l", "1", "-singlefile"])
-        .arg(source)
-        .arg(&prefix)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .await
-        .ok()?;
+    let result = tokio::time::timeout(
+        poppler_timeout,
+        Command::new("pdftoppm")
+            .kill_on_drop(true)
+            .args(["-jpeg", "-r", "72", "-f", "1", "-l", "1", "-singlefile"])
+            .arg(source)
+            .arg(&prefix)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status(),
+    )
+    .await;
 
-    if !status.success() {
+    let status = match result {
+        Ok(Ok(status)) => Some(status),
+        Ok(Err(_)) => {
+            tracing::debug!("pdftoppm unavailable; skipping thumbnail");
+            return None;
+        }
+        Err(_) => {
+            tracing::warn!(
+                source = %source.display(),
+                timeout_secs = poppler_timeout.as_secs(),
+                "pdftoppm exceeded its timeout and was killed"
+            );
+            None
+        }
+    };
+
+    // A failed or killed run may still have written a partial JPEG. Nothing
+    // points at it (the caller only records a name below on success), so it
+    // would live in thumbnail_dir forever — remove it here instead.
+    if status.is_none_or(|status| !status.success()) {
+        let _ = tokio::fs::remove_file(thumbnail_dir.join(&filename)).await;
         tracing::debug!(source = %source.display(), "pdftoppm failed");
         return None;
     }
 
-    let filename = format!("{stem}.jpg");
     if thumbnail_dir.join(&filename).exists() {
         Some(filename)
     } else {
@@ -242,6 +276,28 @@ PDF version:     1.4";
         assert_eq!(sanitize_filename(".hidden"), "hidden");
         assert_eq!(sanitize_filename(""), "document");
         assert_eq!(sanitize_filename("a:b*c?.pdf"), "a_b_c_.pdf");
+    }
+
+    /// A run that outlives its timeout (real; a wedged poppler) must leave no
+    /// partial JPEG behind — acceptance of TODO T06 "no orphan thumbnails".
+    #[tokio::test]
+    async fn a_thumbnail_that_hits_the_timeout_writes_no_file() {
+        use std::time::Duration;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pdf = dir.path().join("sample.pdf");
+        std::fs::write(&pdf, b"%PDF-1.4 placeholder").expect("write pdf");
+
+        let name =
+            generate_thumbnail(&pdf, dir.path(), 1, Duration::from_millis(1)).await;
+        assert!(name.is_none(), "the run must be given up, not completed");
+        assert!(
+            std::fs::read_dir(dir.path())
+                .expect("list dir")
+                .filter_map(|entry| entry.ok())
+                .all(|entry| entry.path().extension().is_none_or(|ext| ext != "jpg")),
+            "no partial .jpg may remain"
+        );
     }
 
     #[test]

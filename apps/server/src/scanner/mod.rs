@@ -122,11 +122,39 @@ pub async fn full_scan(state: &AppState) -> AppResult<()> {
     Ok(())
 }
 
+/// True for a filesystem event the watcher should react to.
+///
+/// inotify (via `notify`) watches `OPEN | CLOSE_WRITE | ATTRIB` as well as
+/// content changes, which surface as `EventKind::Access(..)` and
+/// `EventKind::Modify(ModifyKind::Metadata(..))`. Indexing a file *opens* it
+/// (hash read, `pdfinfo`, `pdftotext`, `pdftoppm`), so reacting to those
+/// would re-queue the file we just indexed — a self-feeding loop that pins a
+/// CPU with hashing and poppler work while logging nothing (unchanged hashes
+/// resolve to `Outcome::Skipped`). Only Access and Metadata are dropped: every
+/// other kind (create, remove, data/name/other modifies, overflow notices)
+/// is treated as a potential content change, so no backend can go blind.
+/// Deletions surface as `Remove` and renames as `Modify(Name(..))`.
+fn is_actionable(event: &notify::Event) -> bool {
+    use notify::event::{EventKind, ModifyKind};
+
+    if event.need_rescan() {
+        return true;
+    }
+    !matches!(
+        event.kind,
+        EventKind::Access(_) | EventKind::Modify(ModifyKind::Metadata(_))
+    )
+}
+
 /// Watches the library for changes and keeps the index current.
 ///
 /// Events are debounced: a single copy over SMB produces a burst of writes, and
 /// reacting to each one would hash and re-thumbnail a file that is still being
 /// written. The watcher runs for the life of the process.
+///
+/// Only content lifecycle events are queued (see [`is_actionable`]): access
+/// and metadata events are dropped at the notify callback, before they ever
+/// reach the debounce queue, so indexing a file cannot re-trigger itself.
 pub fn spawn_watcher(state: AppState) {
     let roots = state.config.all_library_roots();
 
@@ -134,7 +162,9 @@ pub fn spawn_watcher(state: AppState) {
         let (tx, mut rx) = mpsc::unbounded_channel::<notify::Event>();
 
         let mut watcher = match notify::recommended_watcher(move |result| {
-            if let Ok(event) = result {
+            if let Ok(event) = result
+                && is_actionable(&event)
+            {
                 // A closed receiver just means shutdown.
                 let _ = tx.send(event);
             }
@@ -163,6 +193,7 @@ pub fn spawn_watcher(state: AppState) {
         tracing::info!(watched, "watching libraries for changes");
 
         let mut pending: HashSet<PathBuf> = HashSet::new();
+        let mut rescan_requested = false;
 
         loop {
             // Collect events until the share goes quiet, then act once.
@@ -170,14 +201,34 @@ pub fn spawn_watcher(state: AppState) {
                 Some(event) => event,
                 None => break,
             };
+            if event.need_rescan() {
+                rescan_requested = true;
+            }
             pending.extend(event.paths);
 
             loop {
                 match tokio::time::timeout(Duration::from_millis(1500), rx.recv()).await {
-                    Ok(Some(event)) => pending.extend(event.paths),
+                    Ok(Some(event)) => {
+                        if event.need_rescan() {
+                            rescan_requested = true;
+                        }
+                        pending.extend(event.paths);
+                    }
                     Ok(None) => break,
                     Err(_) => break, // quiet period reached
                 }
+            }
+
+            // An overflow (Flag::Rescan) means the kernel dropped events: some
+            // change went unseen, so reconcile the whole tree rather than
+            // trusting the partial pending set.
+            if rescan_requested {
+                rescan_requested = false;
+                pending.clear();
+                if let Err(err) = full_scan(&state).await {
+                    tracing::warn!(?err, "rescan after watcher overflow failed");
+                }
+                continue;
             }
 
             for path in pending.drain() {
@@ -209,4 +260,63 @@ pub fn spawn_watcher(state: AppState) {
         // for the life of the task.
         drop(watcher);
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use notify::event::{
+        AccessKind, AccessMode, DataChange, EventKind, MetadataKind, ModifyKind,
+    };
+
+    fn event(kind: EventKind) -> notify::Event {
+        notify::Event::new(kind).add_path(PathBuf::from("/library/paper.pdf"))
+    }
+
+    #[test]
+    fn open_and_close_events_do_not_requeue_the_file_just_indexed() {
+        // Indexing a file opens and closes it; reacting to those would feed
+        // the file straight back into the debounce queue, forever.
+        assert!(!is_actionable(&event(EventKind::Access(AccessKind::Open(
+            AccessMode::Any
+        )))));
+        assert!(!is_actionable(&event(EventKind::Access(AccessKind::Close(
+            AccessMode::Read
+        )))));
+        assert!(!is_actionable(&event(EventKind::Access(AccessKind::Close(
+            AccessMode::Write
+        )))));
+    }
+
+    #[test]
+    fn metadata_only_changes_do_not_requeue() {
+        assert!(!is_actionable(&event(EventKind::Modify(
+            ModifyKind::Metadata(MetadataKind::Any)
+        ))));
+    }
+
+    #[test]
+    fn content_lifecycle_events_still_reach_the_indexer() {
+        use notify::event::{CreateKind, RemoveKind, RenameMode};
+
+        assert!(is_actionable(&event(EventKind::Create(CreateKind::File))));
+        assert!(is_actionable(&event(EventKind::Create(CreateKind::Folder))));
+        assert!(is_actionable(&event(EventKind::Remove(RemoveKind::File))));
+        assert!(is_actionable(&event(EventKind::Modify(
+            ModifyKind::Data(DataChange::Content)
+        ))));
+        assert!(is_actionable(&event(EventKind::Modify(
+            ModifyKind::Name(RenameMode::Both)
+        ))));
+        assert!(is_actionable(&event(EventKind::Modify(ModifyKind::Other))));
+        assert!(is_actionable(&event(EventKind::Other)));
+        assert!(is_actionable(&event(EventKind::Any)));
+    }
+
+    #[test]
+    fn an_overflow_notice_requests_a_rescan() {
+        let overflow = event(EventKind::Other).set_flag(notify::event::Flag::Rescan);
+        assert!(overflow.need_rescan());
+        assert!(is_actionable(&overflow));
+    }
 }

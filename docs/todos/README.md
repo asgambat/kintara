@@ -17,16 +17,17 @@ Scala usata:
 | T02 | Scan di avvio in background ✅ | Alta | S | — (abilitava T12) |
 | T03 | INSERT pagine in batch in `extract_and_store` | Media | S | — |
 | T04 | Upload robusto (temp da crash + anti-orfani) ✅ | Alta | M | — (consigliato prima di T05) |
-| T05 | Thumbnail in background con placeholder | Media | M | T04 |
-| T06 | Timeout + kill sui processi poppler | Alta | S | — |
+| T05 | Thumbnail in background con placeholder ✅ | Media | M | T04 |
+| T06 | Timeout + kill sui processi poppler ✅ | Alta | S | — |
+| T18 | Estrazione testo fuori dalla richiesta di upload | Media | M | — |
 
 ## Backend — database
 
 | ID | Titolo | Importanza | Effort | Dipendenze |
 |----|--------|------------|--------|------------|
-| T07 | Indice su `library_documents(document_id)` | Media | S | — (migrazione) |
-| T08 | `auto_vacuum` incrementale + manutenzione | Bassa | S | — |
-| T09 | Snapshot schedulati del DB (oltre il pre-migrazione) | Media | S | — (riusa rotazione esistente) |
+| T07 | Indice su `library_documents(document_id)` ✅ | Media | S | — (migrazione) |
+| T08 | `auto_vacuum` incrementale + manutenzione ✅ | Bassa | S | — |
+| T09 | Snapshot schedulati del DB (oltre il pre-migrazione) ✅ | Media | S | — (riusa rotazione esistente) |
 
 ## Backend — robustezza / sicurezza
 
@@ -34,6 +35,9 @@ Scala usata:
 |----|--------|------------|--------|------------|
 | T10 | Rescan periodico opzionale (watcher cieco su CIFS) | Media | S | — |
 | T11 | Rate limiting sugli endpoint auth | Alta | M | — |
+| T19 | Recovery all'avvio di test e thumbnail mancanti | Media | S | T05 |
+| T20 | Collisione di filename negli upload concorrenti | Media | S | — |
+| T22 | Hardening del cookie di sessione | Alta | S | — |
 
 ## Frontend
 
@@ -50,5 +54,6 @@ Scala usata:
 | T15 | Hardening del compose d'esempio | Media | S | — |
 | T16 | `max-size` sui log JSON di Docker | Bassa | S | — (sta in T15 se fatto insieme) |
 | T17 | `Cache-Control: immutable` su `/assets/*` ✅ | Bassa | S | — |
+| T21 | Allineare il compose d'esempio all'immagine pubblicata | Alta | S | — |
 
-Stato: T01, T02, T04, T12, T13, T14 e T17 implementati. Resto: T03, T05, T06, T07, T08, T09, T10, T11, T15, T16.
+Stato: T01, T02, T04, T05, T06, T07, T08, T09, T12, T13, T14 e T17 implementati. Resto: T03, T10, T11, T15, T16, T18, T19, T20, T21, T22.
