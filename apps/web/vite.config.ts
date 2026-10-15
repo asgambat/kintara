@@ -129,6 +129,13 @@ function pdfjsAssets(): Plugin {
 export default defineConfig(async () => ({
   plugins: [react(), brandAssets(), pdfjsAssets()],
 
+  // pdf.worker.min.mjs reads `import.meta.url`, so the bundled worker must keep
+  // module semantics: the default iife worker format cannot express that, and
+  // pdf.js loads the worker with `new Worker(src, { type: "module" })` anyway.
+  worker: {
+    format: "es",
+  },
+
   build: {
     // The single index bundle used to pass 1 MB: pdf.js rides with the first
     // paint even though it is only needed once a PDF is opened, and React

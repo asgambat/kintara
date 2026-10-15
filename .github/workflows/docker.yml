@@ -195,21 +195,21 @@ jobs:
           docker buildx imagetools inspect \
             "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }}"
 
-      # Make the published package public right after the push. Container
-      # packages created by Actions are born private (or Internal on orgs),
-      # which makes unauthenticated `docker pull` fail 401; the visibility is
-      # per-package, so once this PATCH succeeds every later push keeps it
-      # public. Needs a token with packages scope: the org-blocked GITHUB_TOKEN
-      # case is why GHCR_TOKEN is preferred, exactly as for the login step.
+      # Attempt to switch the package visibility to public after the push.
+      # KNOWN LIMITATION: GitHub rejects this PATCH with 404 for ORGANIZATION
+      # packages even for an org admin with write:packages, so treat it as
+      # best-effort: log a warning whenever the PATCH fails but keep the run
+      # green. Changing the visibility through the package settings UI is the
+      # supported human path; once public there, every later push stays public.
       - name: Publish package as public
         env:
           GH_TOKEN: ${{ secrets.GHCR_TOKEN || secrets.GITHUB_TOKEN }}
         run: |
           owner=$(echo "${GITHUB_REPOSITORY%%/*}" | tr '[:upper:]' '[:lower:]')
           name=$(echo "${GITHUB_REPOSITORY#*/}" | tr '[:upper:]' '[:lower:]')
-          gh api \
-            --method PATCH "orgs/$owner/packages/container/$name" \
-            -f visibility=public
+          gh api --method PATCH "orgs/$owner/packages/container/$name" \
+            -f visibility=public \
+            || echo "::warning::Cannot PATCH visibility (GitHub 404 for org packages); change it in the package settings UI instead"
           code=$(curl -s -o /dev/null -w '%{http_code}' \
             "https://ghcr.io/v2/$owner/$name/manifests/latest")
           echo "Anonymous manifest probe: HTTP $code"

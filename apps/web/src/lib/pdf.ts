@@ -1,8 +1,12 @@
 import * as pdfjsLib from "pdfjs-dist";
-// Vite resolves this to a hashed URL under /assets and copies the file into the
-// build. The desktop version pulled the worker from unpkg, which broke any
+// The Map upsert polyfill is imported once in main.tsx, the entry chunk, so it
+// always executes before any PDF code on browsers without the native methods.
+// Build the worker from our own wrapper so the same polyfill runs inside
+// the worker world too, before pdf.js code. Vite bundles it as an ES module
+// worker (`worker.format: "es"`) and `?worker&url` yields the hashed URL.
+// The desktop version pulled the worker from unpkg, which broke any
 // offline use — and a NAS is frequently offline or firewalled.
-import workerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url";
+import workerUrl from "./pdf.worker.entry.ts?worker&url";
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = workerUrl;
 
