@@ -1,9 +1,9 @@
-// Must be the web app's first import: the ES "upsert" Map methods that pdf.js
-// calls are missing on older browsers (Safari, dated Chrome/Firefox), and the
-// patch has to be in place before any lazy chunk such as the PDF reader loads.
-// See lib/map-upsert-polyfill.ts; the worker does the same in its own world
-// via lib/pdf.worker.entry.ts.
-import "./lib/map-upsert-polyfill";
+// Must be the web app's first import: modern ECMAScript APIs that pdf.js calls
+// (Map upsert, Uint8Array hex/base64) are missing on older browsers, and the
+// patches have to be in place before any lazy chunk such as the PDF reader
+// loads. See lib/modern-api-polyfill.ts; the worker does the same in its own
+// world via lib/pdf.worker.entry.ts.
+import "./lib/modern-api-polyfill";
 import React from "react";
 import ReactDOM from "react-dom/client";
 import App from "./App";

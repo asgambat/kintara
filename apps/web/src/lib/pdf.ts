@@ -1,6 +1,7 @@
 import * as pdfjsLib from "pdfjs-dist";
-// The Map upsert polyfill is imported once in main.tsx, the entry chunk, so it
-// always executes before any PDF code on browsers without the native methods.
+// The modern-API polyfill (Map upsert, Uint8Array hex/base64 — see
+// lib/modern-api-polyfill.ts) is imported once in main.tsx, the entry chunk, so
+// it always executes before any PDF code on browsers without the native APIs.
 // Build the worker from our own wrapper so the same polyfill runs inside
 // the worker world too, before pdf.js code. Vite bundles it as an ES module
 // worker (`worker.format: "es"`) and `?worker&url` yields the hashed URL.
